@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "A Node.js application to extract HTML and computed styles from websites",
   "main": "server.js",
+
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
