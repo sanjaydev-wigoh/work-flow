@@ -2,7 +2,8 @@ const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
 const cheerio = require('cheerio');
-const fetch = require('node-fetch'); // You'll need to install this: npm install node-fetch@2
+const fetch = require('node-fetch');
+const { JSDOM } = require('jsdom'); // Added for widget extraction
 
 const app = express();
 const PORT = 3000;
@@ -129,20 +130,51 @@ ${bodyContent}
         console.log('🔄 STEP 5: Processing HTML and extracting components...');
         const result = await processHtmlAndExtractComponents(processedHtml.styledHtml, __dirname);
         
-        console.log('\n🎉 COMPONENT EXTRACTION COMPLETED SUCCESSFULLY!');
+        // NEW STEP: Extract widgets from each component
+        console.log('\n🛠️ STEP 6: Extracting widgets from components...');
+        const widgetExtractions = [];
+        
+        for (const component of result.extractedComponents) {
+            if (component.found) {
+                const componentPath = path.join(__dirname, component.componentFile);
+                const componentHtml = await fs.readFile(componentPath, 'utf8');
+                
+                const widgetResult = await extractWidgetsFromHtml(
+                    componentHtml, 
+                    component.placeholderId, 
+                    path.join(__dirname, 'components')
+                );
+                
+                if (!widgetResult.failed) {
+                    widgetExtractions.push({
+                        componentId: component.placeholderId,
+                        widgetsFile: widgetResult.widgetsFile,
+                        htmlOutputFile: widgetResult.htmlOutputFile,
+                        widgetCount: Object.keys(widgetResult.widgets).length
+                    });
+                    
+                    // Update the component file with widget-extracted version
+                    await fs.writeFile(componentPath, widgetResult.modifiedHtml);
+                }
+            }
+        }
+        
+        console.log('\n🎉 COMPONENT AND WIDGET EXTRACTION COMPLETED SUCCESSFULLY!');
         console.log('📊 Final Statistics:');
         console.log(`   - Components extracted: ${result.extractedComponents.length}`);
         console.log(`   - Target IDs found: ${result.extractedComponents.filter(c => c.found).length}`);
+        console.log(`   - Widgets extracted: ${widgetExtractions.reduce((sum, w) => sum + w.widgetCount, 0)}`);
         console.log(`   - Original HTML with placeholders created`);
         console.log(`   - HTML Source URL: ${htmlUrl}`);
         console.log(`   - Styles Source URL: ${stylesUrl || 'None'}\n`);
         
         res.json({
             success: true,
-            message: 'Component extraction completed successfully',
+            message: 'Component and widget extraction completed successfully',
             stats: {
                 componentsExtracted: result.extractedComponents.length,
                 targetIdsFound: result.extractedComponents.filter(c => c.found).length,
+                widgetsExtracted: widgetExtractions.reduce((sum, w) => sum + w.widgetCount, 0),
                 htmlUrl: htmlUrl,
                 stylesUrl: stylesUrl || null,
                 extractedAt: new Date().toISOString(),
@@ -150,6 +182,7 @@ ${bodyContent}
                 styledHtmlFile: processedHtml.layoutInlineFile
             },
             components: result.extractedComponents,
+            widgetExtractions: widgetExtractions,
             originalHtmlFile: result.originalHtmlFile,
             styledHtmlFile: processedHtml.layoutInlineFile
         });
@@ -183,6 +216,71 @@ ${bodyContent}
     }
 });
 
+// Widget elements to extract
+const WIDGET_ELEMENTS = [
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'svg', 'img', 'image', 
+    'video', 'span', 'button', 'a', 'text', 'wow-image', 'wix-video', 
+    'wow-svg', 'wow-icon', 'wow-canvas', 'iframe'
+];
+
+// Extract widgets from HTML content
+async function extractWidgetsFromHtml(htmlContent, sectionIndex, outputDir) {
+    try {
+        const dom = new JSDOM(htmlContent);
+        const document = dom.window.document;
+        const widgets = {};
+        let widgetCounter = 1;
+
+        function processElement(element) {
+            if (element.nodeType === 1) { // Element node
+                const tagName = element.tagName.toLowerCase();
+                
+                if (WIDGET_ELEMENTS.includes(tagName)) {
+                    const widgetKey = `{{widget-${widgetCounter}}}`;
+                    widgets[widgetKey] = element.outerHTML;
+                    
+                    const placeholder = document.createTextNode(widgetKey);
+                    element.parentNode.replaceChild(placeholder, element);
+                    
+                    widgetCounter++;
+                } else {
+                    const children = Array.from(element.childNodes);
+                    children.forEach(child => processElement(child));
+                }
+            }
+        }
+
+        const body = document.body || document.documentElement;
+        if (body) {
+            const children = Array.from(body.childNodes);
+            children.forEach(child => processElement(child));
+        }
+
+        const modifiedHtml = dom.serialize();
+        const widgetsFile = `widgets_${sectionIndex}.json`;
+        const htmlOutputFile = `widgets_extracted_${sectionIndex}.html`;
+
+        await fs.writeFile(path.join(outputDir, widgetsFile), JSON.stringify(widgets, null, 2));
+        await fs.writeFile(path.join(outputDir, htmlOutputFile), modifiedHtml);
+
+        return {
+            widgets,
+            modifiedHtml,
+            widgetsFile,
+            htmlOutputFile
+        };
+    } catch (error) {
+        console.error(`Error extracting widgets for section ${sectionIndex}:`, error);
+        return {
+            error: error.message,
+            failed: true
+        };
+    }
+}
+
+// [Rest of the original code remains unchanged...]
+// This includes:
+// - EnhancedHtmlStyleProcessor class
 class EnhancedHtmlStyleProcessor {
     constructor() {
         this.unmatchedElements = [];
@@ -530,8 +628,7 @@ class EnhancedHtmlStyleProcessor {
             .join('\n');
     }
 }
-
-// Process HTML and extract components (HTML only, no JSON)
+// - processHtmlAndExtractComponents function
 async function processHtmlAndExtractComponents(fullPageHtml, outputDir) {
     console.log('📁 Creating components directory...');
     const componentsDir = path.join(outputDir, 'components');
@@ -727,8 +824,7 @@ ${bodyContent}
         originalHtmlFile: originalHtmlFilename
     };
 }
-
-// Create clean component HTML
+// - createCleanComponentHTML function
 function createCleanComponentHTML(componentHtml, originalId, placeholderId) {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -741,8 +837,7 @@ ${componentHtml}
 </body>
 </html>`;
 }
-
-// Create not found component HTML
+// - createNotFoundComponentHTML function
 function createNotFoundComponentHTML(originalId, placeholderId) {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -779,8 +874,7 @@ function createNotFoundComponentHTML(originalId, placeholderId) {
 </body>
 </html>`;
 }
-
-// Health check endpoint
+// - Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'OK', 
@@ -788,10 +882,11 @@ app.get('/health', (req, res) => {
         version: '6.0.0-html-components-only'
     });
 });
+// - Server startup and error handling
 
 // Start server
 app.listen(PORT, () => {
-    console.log('\n🚀 HTML COMPONENT EXTRACTOR V6.0 (HTML COMPONENTS ONLY)');
+    console.log('\n🚀 HTML COMPONENT AND WIDGET EXTRACTOR V6.1');
     console.log('═══════════════════════════════════════════════════════════════════════════');
     console.log(`🌐 Server URL: http://localhost:${PORT}`);
     console.log(`📅 Started at: ${new Date().toISOString()}`);
@@ -799,12 +894,15 @@ app.listen(PORT, () => {
     console.log('   ✅ HTML URL input (required)');
     console.log('   ✅ Optional styles URL for style processing');
     console.log('   ✅ HTML component extraction');
+    console.log('   ✅ Widget extraction from components');
     console.log('   ✅ Target ID components (BACKGROUND_GROUP, pinned elements)');
     console.log('   ✅ Top-level section components');
     console.log('   ✅ Placeholder replacement in original HTML');
     console.log('\n📁 OUTPUT:');
     console.log('   - original_with_placeholders.html');
     console.log('   - components/ (HTML component files)');
+    console.log('   - widgets_*.json (extracted widgets for each component)');
+    console.log('   - widgets_extracted_*.html (component HTML with widget placeholders)');
     console.log('   - layout_inlineStyles_0.html (with styles applied if styles URL provided)');
     console.log('═══════════════════════════════════════════════════════════════════════════\n');
 });

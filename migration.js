@@ -605,21 +605,9 @@ ${bodyContent}
 function createCleanComponentHTML(componentHtml, originalId, placeholderId) {
     return `<!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Component: ${placeholderId} (${originalId})</title>
-    <style>
-        /* Add your custom styles here */
-        /* Reference the ${placeholderId}_${originalId}.json for nested structure and styles */
-        /* This file contains ALL nested elements with their styles and children */
-    </style>
-</head>
+
 <body>
-    <!-- Extracted Component: ${originalId} -->
-    <!-- Placeholder ID: ${placeholderId} -->
-    <!-- Replace {{${placeholderId}}} in original HTML with this component -->
-    <!-- This component includes ALL nested elements with wig-id attribute -->
+
     
 ${componentHtml}
 

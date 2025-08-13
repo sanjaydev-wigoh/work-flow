@@ -26,7 +26,7 @@
             border-radius: 20px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
             padding: 40px;
-            max-width: 500px;
+            max-width: 600px;
             width: 100%;
             text-align: center;
             position: relative;
@@ -205,6 +205,13 @@
             font-size: 0.9rem;
         }
 
+        .input-description {
+            font-size: 0.85rem;
+            color: #666;
+            margin-top: 5px;
+            font-style: italic;
+        }
+
         @media (max-width: 480px) {
             .container {
                 padding: 30px 20px;
@@ -223,23 +230,36 @@
 <body>
     <div class="container">
         <h1>🚀 HTML Migrator</h1>
-        <p class="subtitle">Extract HTML and computed styles from any website</p>
+        <p class="subtitle">Extract HTML and computed styles from separate sources</p>
         
         <form id="migrateForm">
             <div class="input-group">
-                <label for="urlInput">Website URL</label>
+                <label for="htmlUrlInput">HTML Content URL</label>
                 <input 
                     type="url" 
-                    id="urlInput" 
-                    name="url" 
-                    placeholder="https://example.com"
+                    id="htmlUrlInput" 
+                    name="htmlUrl" 
+                    placeholder="https://example.com/page.html"
                     required
                 >
+                <p class="input-description">URL to fetch the HTML content (body elements only)</p>
+            </div>
+            
+            <div class="input-group">
+                <label for="stylesUrlInput">Computed Styles JSON URL</label>
+                <input 
+                    type="url" 
+                    id="stylesUrlInput" 
+                    name="stylesUrl" 
+                    placeholder="https://example.com/computed-styles.json"
+                    required
+                >
+                <p class="input-description">URL to fetch the computed styles JSON data</p>
             </div>
             
             <button type="submit" class="migrate-btn" id="migrateBtn">
                 <span class="spinner"></span>
-                <span class="btn-text">Migrate Website</span>
+                <span class="btn-text">Migrate Content</span>
             </button>
         </form>
         
@@ -248,7 +268,8 @@
 
     <script>
         const form = document.getElementById('migrateForm');
-        const urlInput = document.getElementById('urlInput');
+        const htmlUrlInput = document.getElementById('htmlUrlInput');
+        const stylesUrlInput = document.getElementById('stylesUrlInput');
         const migrateBtn = document.getElementById('migrateBtn');
         const btnText = document.querySelector('.btn-text');
         const message = document.getElementById('message');
@@ -256,14 +277,17 @@
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             
-            const url = urlInput.value.trim();
-            if (!url) {
-                showMessage('Please enter a valid URL', 'error');
+            const htmlUrl = htmlUrlInput.value.trim();
+            const stylesUrl = stylesUrlInput.value.trim();
+            
+            if (!htmlUrl || !stylesUrl) {
+                showMessage('Please enter both HTML URL and Computed Styles JSON URL', 'error');
                 return;
             }
 
             console.log('🚀 Starting migration request...');
-            console.log('URL:', url);
+            console.log('HTML URL:', htmlUrl);
+            console.log('Styles URL:', stylesUrl);
             console.log('Timestamp:', new Date().toISOString());
 
             // Start loading state
@@ -273,7 +297,10 @@
             try {
                 console.log('📤 Sending POST request to /migrate...');
                 
-                const requestBody = { url };
+                const requestBody = { 
+                    htmlUrl: htmlUrl,
+                    stylesUrl: stylesUrl 
+                };
                 console.log('Request body:', requestBody);
                 
                 const response = await fetch('/migrate', {
@@ -294,9 +321,7 @@
 
                 if (response.ok) {
                     console.log('✅ Migration successful!');
-                    // Store stats for display
-                    window.lastMigrationStats = result.stats;
-                    showMessage('Migration completed successfully!', 'success', result.files);
+                    showMessage('Migration completed successfully!', 'success', result.stats);
                 } else {
                     console.error('❌ Migration failed with status:', response.status);
                     throw new Error(result.message || `HTTP ${response.status}: ${response.statusText}`);
@@ -332,43 +357,40 @@
             if (loading) {
                 migrateBtn.disabled = true;
                 migrateBtn.classList.add('loading');
-                btnText.textContent = 'Migrating...';
+                btnText.textContent = 'Processing...';
             } else {
                 migrateBtn.disabled = false;
                 migrateBtn.classList.remove('loading');
-                btnText.textContent = 'Migrate Website';
+                btnText.textContent = 'Migrate Content';
             }
         }
 
-        function showMessage(text, type, files = null) {
+        function showMessage(text, type, stats = null) {
             message.className = `message ${type}`;
             message.style.display = 'block';
             
             let content = `<p>${text}</p>`;
             
-                            if (files && type === 'success') {
+            // Add stats if available
+            if (stats && type === 'success') {
+                content += `
+                    <div class="stats">
+                        <h4>Migration Statistics:</h4>
+                        <p><strong>Components Extracted:</strong> ${stats.componentsExtracted}</p>
+                        <p><strong>Target IDs Found:</strong> ${stats.targetIdsFound}</p>
+                        <p><strong>Original HTML File:</strong> ${stats.originalHtmlFile}</p>
+                        <p><strong>Extracted At:</strong> ${new Date(stats.extractedAt).toLocaleString()}</p>
+                    </div>
+                `;
+                
                 content += `
                     <div class="file-list">
                         <h4>Files created:</h4>
                         <ul>
-                            <li>📄 ${files.html}</li>
-                            <li>🎨 ${files.stylesJson}</li>
-                            <li>📝 ${files.css}</li>
+                            <li>📄 ${stats.originalHtmlFile}</li>
+                            <li>📁 components/ folder with extracted components</li>
+                            <li>🎨 JSON files with computed styles</li>
                         </ul>
-                    </div>
-                `;
-            }
-            
-            // Add stats if available
-            if (window.lastMigrationStats && type === 'success') {
-                const stats = window.lastMigrationStats;
-                content += `
-                    <div class="stats">
-                        <h4>Migration Statistics:</h4>
-                        <p><strong>Total Elements:</strong> ${stats.totalElements}</p>
-                        <p><strong>Page Title:</strong> ${stats.title}</p>
-                        <p><strong>Source URL:</strong> ${stats.url}</p>
-                        <p><strong>Extracted At:</strong> ${new Date(stats.extractedAt).toLocaleString()}</p>
                     </div>
                 `;
             }
@@ -380,8 +402,8 @@
             message.style.display = 'none';
         }
 
-        // Auto-focus the input field
-        urlInput.focus();
+        // Auto-focus the first input field
+        htmlUrlInput.focus();
 
         // Add connection test on page load
         window.addEventListener('load', async () => {
