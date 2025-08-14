@@ -110,7 +110,6 @@ MERGING PROCESS:
 - Remove duplicate CSS properties, keeping the most specific/last value
 - Maintain the main div's data attributes and ID
 
-
 The output must render PIXEL-PERFECT identical to the input.
 
 OUTPUT ONLY THE OPTIMIZED HTML:
@@ -465,7 +464,6 @@ async function generateBareMinimumHtml(sectionIndex, outputDir) {
         componentTemplates
     };
 }
-
 // Helper functions for flex/grid processing
 function hasFlexOrGridProperties(element, $) {
     const $element = $(element);
@@ -546,8 +544,8 @@ if (!isMainThread) {
                     { role: "system", content: systemPrompt },
                     { role: "user", content: html }
                 ],
-                temperature: 0.1,
-                max_tokens: 8192
+                temperature: 0,
+                max_tokens: 12288,
             });
 
             let optimizedHtml = response.choices[0].message.content.trim();
