@@ -2,7 +2,11 @@ const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
 const cheerio = require('cheerio');
-const fetch = require('node-fetch'); // You'll need to install this: npm install node-fetch@2
+const fetch = require('node-fetch');
+const { JSDOM } = require('jsdom');
+const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
+const { OpenAI } = require('openai');
+require('dotenv').config();
 
 const app = express();
 const PORT = 3000;
@@ -19,13 +23,646 @@ app.use((req, res, next) => {
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
     next();
 });
-
 // Serve the main HTML page
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
+// Widget elements to extract
+const WIDGET_ELEMENTS = [
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'svg', 'img', 'image', 
+    'video', 'span', 'button', 'a', 'text', 'wow-image', 'wix-video', 
+    'wow-svg', 'wow-icon', 'wow-canvas'
+];
+// Extract widgets from HTML content
+async function extractWidgetsFromHtml(htmlContent, sectionIndex, outputDir) {
+    try {
+        const dom = new JSDOM(htmlContent);
+        const document = dom.window.document;
+        const widgets = {};
+        let widgetCounter = 1;
 
-// Migration endpoint with dual URL processing
+        function processElement(element) {
+            if (element.nodeType === 1) { // Element node
+                const tagName = element.tagName.toLowerCase();
+                
+                if (WIDGET_ELEMENTS.includes(tagName)) {
+                    const widgetKey = `{{widget-${widgetCounter}}}`;
+                    widgets[widgetKey] = element.outerHTML;
+                    
+                    const placeholder = document.createTextNode(widgetKey);
+                    element.parentNode.replaceChild(placeholder, element);
+                    
+                    widgetCounter++;
+                } else {
+                    const children = Array.from(element.childNodes);
+                    children.forEach(child => processElement(child));
+                }
+            }
+        }
+
+        const body = document.body || document.documentElement;
+        if (body) {
+            const children = Array.from(body.childNodes);
+            children.forEach(child => processElement(child));
+        }
+
+        const modifiedHtml = dom.serialize();
+        const widgetsFile = `widgets_${sectionIndex}.json`;
+        const htmlOutputFile = `widgets_extracted_${sectionIndex}.html`;
+
+        await fs.writeFile(path.join(outputDir, widgetsFile), JSON.stringify(widgets, null, 2));
+        await fs.writeFile(path.join(outputDir, htmlOutputFile), modifiedHtml);
+
+        return {
+            widgets,
+            modifiedHtml,
+            widgetsFile,
+            htmlOutputFile
+        };
+    } catch (error) {
+        console.error(`Error extracting widgets for section ${sectionIndex}:`, error);
+        return {
+            error: error.message,
+            failed: true
+        };
+    }
+}
+// Background layers optimization prompt
+const BGLAYERS_OPTIMIZATION_PROMPT = `
+You are optimizing Wix bgLayers HTML. Your goal is to reduce the number of divs while STRICTLY preserving ALL visual properties.
+
+CRITICAL RULES:
+1. OUTPUT ONLY THE OPTIMIZED HTML - NO EXPLANATIONS OR COMMENTS
+2. ALWAYS merge ALL classes from child divs into the parent div's class attribute
+3. ALWAYS merge ALL styles from child divs into the parent div's style attribute
+4. When merging styles, if parent and child have the same CSS property, use the child's value (child shouldn't overrides parent)
+5. PRESERVE ALL BACKGROUND PROPERTIES: background-color, background-image, background-size, background-position, background-repeat
+6. Keep all data-* attributes on the main div
+
+MERGING PROCESS:
+- Collect ALL class names from parent and ALL children → combine into single class attribute
+- Collect ALL style properties from parent and ALL children → combine into single style attribute  
+- Remove duplicate CSS properties, keeping the most specific/last value
+- Maintain the main div's data attributes and ID
+
+The output must render PIXEL-PERFECT identical to the input.
+
+OUTPUT ONLY THE OPTIMIZED HTML:
+`;
+// Flex grid optimization prompt
+const FLEXGRID_OPTIMIZATION_PROMPT = `
+You are a Wix HTML optimization expert. REDUCE div count while maintaining PIXEL-PERFECT IDENTICAL rendering.
+
+ULTRA-STRICT PRESERVATION RULES:
+1. OUTPUT ONLY THE OPTIMIZED HTML - NO EXPLANATIONS
+2. PRESERVE ALL LAYOUT PROPERTIES: display, flex-direction, justify-content, align-items, gap
+3. PRESERVE ALL POSITIONING: position, top, left, right, bottom, transform, z-index
+4. PRESERVE ALL SPACING: margin, margin-top, margin-left, margin-right, margin-bottom, padding (all variants)
+5. PRESERVE ALL DIMENSIONS: width, height, min/max constraints
+6. PRESERVE ALL VISUAL: overflow, opacity, visibility, filter, backdrop-filter
+7. PRESERVE ALL GRID: grid-template-columns, grid-template-rows, grid-gap, grid-area
+8. Keep ALL template placeholders: {{template-XXXX}} in exact same positions
+9. Merge classes and attributes safely without conflicts
+
+CRITICAL FLEX/GRID SAFETY:
+- display:flex MUST be preserved
+- display:grid MUST be preserved  
+- flex-direction MUST be preserved
+- justify-content MUST be preserved
+- align-items MUST be preserved
+- grid-template-columns/rows MUST be preserved
+- gap/grid-gap MUST be preserved
+- flex-wrap MUST be preserved
+
+CRITICAL SPACING SAFETY:
+- margin properties affect other elements - MUST preserve
+- padding affects inner content positioning - MUST preserve
+- border affects dimensions - MUST preserve
+
+AGGRESSIVE DIV REDUCTION: 2 divs → 1 div, 3 divs → 1 div, 5 divs → 2 divs maximum
+
+DIV REDUCTION STRATEGIES (WITH POSITIONING SAFETY):
+- Merge parent-child divs ONLY if all positioning/sizing properties are preserved
+- Eliminate wrapper divs by moving ALL their properties to child or parent
+- Combine properties without losing any layout information
+- Use CSS shorthand but maintain exact values
+- Flatten nesting while preserving exact positioning chain
+
+EXAMPLE 1 - REDUCE 3 DIVS TO 2 DIVS (SAFE POSITIONING):
+INPUT (3 divs):
+<div id="parent" class="flex-container" style="display: flex; height: 200px; width: 400px; position: relative;">
+  <div class="wrapper" style="position: relative; height: 200px; width: 400px; padding: 20px;">
+    <div id="child" class="content" style="height: 100px; width: 200px; position: absolute; top: 50px; left: 100px; margin: 10px;">
+      {{template-2001}}
+    </div>
+  </div>
+</div>
+
+OUTPUT (2 divs - ALL properties preserved):
+<div id="parent" class="flex-container wrapper" style="display:flex;height:200px;width:400px;position:relative;padding:20px">
+<div id="child" class="content" style="height:100px;width:200px;position:absolute;top:50px;left:100px;margin:10px">{{template-2001}}</div>
+</div>
+
+WIDGET POSITIONING PROTECTION:
+- Template placeholders {{template-XXXX}} positioning MUST be identical
+- Parent positioning context MUST be maintained for absolute children
+- Transform and transform-origin MUST be kept for animations
+
+The output must be VISUALLY IDENTICAL. Any layout shift is forbidden.
+
+HTML TO OPTIMIZE:
+`;
+async function optimizeWithAI(html, promptType, elementId, maxRetries = 2) {
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            console.log(`🤖 AI optimization attempt ${attempt}/${maxRetries} for ${elementId}`);
+            
+            return new Promise((resolve, reject) => {
+                const worker = new Worker(__filename, {
+                    workerData: { html, promptType, elementId }
+                });
+                
+                // Set timeout for individual AI calls
+                const timeout = setTimeout(() => {
+                    worker.terminate();
+                    reject(new Error(`AI optimization timeout for ${elementId}`));
+                }, 60000); // 60 second timeout per element
+                
+                worker.on('message', (result) => {
+                    clearTimeout(timeout);
+                    worker.terminate();
+                    resolve(result);
+                });
+                
+                worker.on('error', (error) => {
+                    clearTimeout(timeout);
+                    worker.terminate();
+                    reject(error);
+                });
+                
+                worker.on('exit', (code) => {
+                    clearTimeout(timeout);
+                    if (code !== 0) {
+                        reject(new Error(`Worker stopped with exit code ${code} for ${elementId}`));
+                    }
+                });
+            });
+        } catch (error) {
+            lastError = error;
+            console.warn(`⚠️ AI optimization attempt ${attempt} failed for ${elementId}: ${error.message}`);
+            
+            if (attempt === maxRetries) {
+                console.error(`❌ All AI optimization attempts failed for ${elementId}`);
+                return {
+                    success: false,
+                    html: html,
+                    error: error.message
+                };
+            }
+            
+            // Brief delay before retry
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        }
+    }
+    
+    return {
+        success: false,
+        html: html,
+        error: lastError?.message || 'Unknown error'
+    };
+}
+
+// Check if element is a critical bgLayer div
+function isCriticalBgLayerDiv(htmlString) {
+    // Simple check for positioning or background properties
+    const hasBackground = /background[^;]*:|rgba\(|rgb\(|#[0-9a-f]{3,6}/i.test(htmlString);
+    const hasPositioning = /position\s*:\s*(absolute|fixed|relative)/i.test(htmlString);
+    const hasTransform = /transform\s*:/i.test(htmlString);
+    
+    return hasBackground || hasPositioning || hasTransform;
+}
+// Process bgLayer div with conservative optimization
+function processBgLayerDiv(divHtml, divId) {
+    // Check if this is a critical bgLayer that should be preserved
+    if (isCriticalBgLayerDiv(divHtml)) {
+        console.log(`🛡️ ${divId} is critical bgLayer - using conservative optimization`);
+        
+        // For critical bgLayers, only do minimal optimization
+        // Remove empty divs but preserve structure and all styling
+        const minimalOptimization = divHtml
+            .replace(/<div[^>]*>\s*<\/div>/g, '') // Remove truly empty divs
+            .replace(/\s+/g, ' ') // Normalize whitespace
+            .trim();
+        
+        return {
+            success: true,
+            html: minimalOptimization,
+            conservative: true
+        };
+    }
+    
+    return null; // Proceed with normal AI optimization
+}
+// Preserve critical bgLayer structure
+function preserveCriticalBgLayerStructure(originalHtml, optimizedHtml) {
+    const extractCSSProperties = (htmlString) => {
+        const styleMatch = htmlString.match(/style="([^"]+)"/);
+        if (!styleMatch) return {};
+        
+        const styleString = styleMatch[1];
+        const properties = {};
+        
+        const cssRegex = /([a-zA-Z-]+)\s*:\s*([^;]+);?/g;
+        let match;
+        
+        while ((match = cssRegex.exec(styleString)) !== null) {
+            const prop = match[1].replace(/-([a-z])/g, (g) => g[1].toUpperCase());
+            properties[prop] = match[2].trim();
+        }
+        
+        return properties;
+    };
+
+    const originalProps = extractCSSProperties(originalHtml);
+    const optimizedProps = extractCSSProperties(optimizedHtml);
+    
+    // If original has critical positioning, ensure optimized preserves it
+    const criticalPositioningProps = ['position', 'top', 'left', 'right', 'bottom', 'zIndex'];
+    const hasCriticalPositioning = criticalPositioningProps.some(prop => originalProps[prop]);
+    
+    if (hasCriticalPositioning) {
+        const preservedPositioning = criticalPositioningProps.every(prop => 
+            !originalProps[prop] || optimizedProps[prop] === originalProps[prop]
+        );
+        
+        if (!preservedPositioning) {
+            console.warn('⚠️ Critical positioning properties lost, using original HTML');
+            return originalHtml;
+        }
+    }
+    
+    // Check background properties preservation
+    const backgroundProps = ['backgroundColor', 'backgroundImage', 'backgroundSize', 'backgroundPosition'];
+    const hasBackground = backgroundProps.some(prop => originalProps[prop]);
+    
+    if (hasBackground) {
+        const preservedBackground = backgroundProps.every(prop =>
+            !originalProps[prop] || optimizedProps[prop] === originalProps[prop]
+        );
+        
+        if (!preservedBackground) {
+            console.warn('⚠️ Background properties lost, using original HTML');
+            return originalHtml;
+        }
+    }
+    
+    return optimizedHtml;
+}
+// Generate bare minimum HTML
+async function generateBareMinimumHtml(sectionIndex, outputDir) {
+    console.log(`\n🚀 Starting bare minimum HTML generation for section ${sectionIndex}`);
+    console.log('='.repeat(60));
+    
+    const widgetsHtmlPath = path.join(outputDir, `widgets_extracted_${sectionIndex}.html`);
+    if (!await fs.access(widgetsHtmlPath).then(() => true).catch(() => false)) {
+        throw new Error(`Widgets-extracted HTML file not found at ${widgetsHtmlPath}`);
+    }
+
+    const widgetsHtml = await fs.readFile(widgetsHtmlPath, 'utf8');
+    console.log(`✅ Found widgets-extracted HTML (${widgetsHtml.length} bytes)`);
+
+    // **STEP 1: Process bgLayers divs with AI CONCURRENTLY**
+    console.log('\n🎨 Processing bgLayers divs with AI optimization (CONCURRENT MODE)...');
+    const $ = cheerio.load(widgetsHtml);
+    const bgLayerDivs = [];
+    
+    $('div[id^="bgLayers"]').each((index, element) => {
+        const $element = $(element);
+        bgLayerDivs.push({
+            id: $element.attr('id'),
+            element: element,
+            html: $.html($element)
+        });
+    });
+
+    console.log(`Found ${bgLayerDivs.length} bgLayers divs`);
+    const bgTemplates = {};
+
+    // Process all bgLayers CONCURRENTLY
+    if (bgLayerDivs.length > 0) {
+        console.log(`\n⚡ Processing ${bgLayerDivs.length} bgLayers divs concurrently...`);
+        
+        const bgPromises = bgLayerDivs.map(async (divData, index) => {
+            const bgKey = `bg-${String(index + 1).padStart(2, '0')}`;
+            
+            // Check size before sending to AI
+            const sizeInBytes = Buffer.byteLength(divData.html, 'utf8');
+            if (sizeInBytes > 10000) {
+                console.warn(`📏 Div ${divData.id} too large (${sizeInBytes} bytes), saving intact`);
+                return {
+                    bgKey,
+                    html: divData.html,
+                    element: divData.element,
+                    optimized: false
+                };
+            }
+            
+            // Use AI optimization for bgLayers
+            console.log(`🤖 Starting AI optimization for ${divData.id}...`);
+            const result = await optimizeWithAI(divData.html, 'bgLayers', divData.id);
+            
+            if (result.success && result.html && result.html !== divData.html) {
+                console.log(`✅ AI optimized ${divData.id}: ${result.originalLength} → ${result.optimizedLength} bytes`);
+                return {
+                    bgKey,
+                    html: result.html,
+                    element: divData.element,
+                    optimized: true
+                };
+            } else {
+                console.log(`🛡️ Using original ${divData.id}: ${result.error || 'No optimization'}`);
+                return {
+                    bgKey,
+                    html: divData.html,
+                    element: divData.element,
+                    optimized: false
+                };
+            }
+        });
+
+        // Wait for all bgLayers to complete
+        const bgResults = await Promise.all(bgPromises);
+        
+        // Apply results
+        bgResults.forEach(result => {
+            bgTemplates[`{{${result.bgKey}}}`] = result.html;
+            $(result.element).replaceWith(`{{${result.bgKey}}}`);
+        });
+
+        console.log(`✅ Completed processing ${bgLayerDivs.length} bgLayers divs concurrently`);
+    }
+
+    // Save background templates
+    const bgJsonFile = `bg_${sectionIndex}.json`;
+    await fs.writeFile(path.join(outputDir, bgJsonFile), JSON.stringify(bgTemplates, null, 2));
+    
+    const htmlWithBgPlaceholders = $.html();
+    const bgPlaceholderHtmlFile = `bg_placeholder_${sectionIndex}.html`;
+    await fs.writeFile(path.join(outputDir, bgPlaceholderHtmlFile), htmlWithBgPlaceholders);
+
+    // **STEP 2: Process flex/grid divs with AI CONCURRENTLY**
+    console.log('\n📊 Processing flex/grid divs with AI optimization (CONCURRENT MODE)...');
+    let $saved = cheerio.load(htmlWithBgPlaceholders);
+    const componentTemplates = {};
+    let templateCounter = 2001;
+    
+    let processedInThisRound = true;
+    let totalProcessed = 0;
+    const maxConcurrentBatch = 10; // Process up to 10 elements concurrently per batch
+    
+    while (processedInThisRound && totalProcessed < 50) { // Safety limit
+        processedInThisRound = false;
+        const flexGridDivs = [];
+        
+        $saved('div[id]').each((index, element) => {
+            const $element = $saved(element);
+            const id = $element.attr('id');
+            
+            // Skip bgLayers and already processed elements
+            if (id && id.startsWith('bgLayers')) return;
+            if ($saved.html($element).includes('{{template-')) return;
+            
+            if (id && hasFlexOrGridProperties(element, $saved)) {
+                if (!containsOnlyWidgets(element, $saved)) {
+                    flexGridDivs.push({
+                        id: id,
+                        element: element,
+                        html: $saved.html($element),
+                        depth: getNestingDepth(element, $saved)
+                    });
+                }
+            }
+        });
+
+        if (flexGridDivs.length === 0) break;
+
+        // Sort by depth (deepest first)
+        flexGridDivs.sort((a, b) => b.depth - a.depth);
+        
+        const batchSize = Math.min(flexGridDivs.length, maxConcurrentBatch);
+        const currentBatch = flexGridDivs.slice(0, batchSize);
+        
+        console.log(`\n⚡ Round ${Math.floor(totalProcessed/maxConcurrentBatch) + 1}: Processing ${currentBatch.length} flex/grid divs concurrently`);
+
+        // Process flex/grid divs CONCURRENTLY
+        const flexGridPromises = currentBatch.map(async (divData, index) => {
+            const templateKey = `template-${String(templateCounter + index).padStart(4, '0')}`;
+            
+            // Check size
+            const sizeInBytes = Buffer.byteLength(divData.html, 'utf8');
+            if (sizeInBytes > 10000) {
+                console.warn(`📏 Div ${divData.id} too large (${sizeInBytes} bytes), saving intact`);
+                return {
+                    templateKey,
+                    html: divData.html,
+                    element: divData.element,
+                    optimized: false,
+                    id: divData.id
+                };
+            }
+            
+            // Use AI optimization for flex/grid
+            console.log(`🤖 Starting AI optimization for ${divData.id}...`);
+            const result = await optimizeWithAI(divData.html, 'flexGrid', divData.id);
+            
+            if (result.success && result.html && result.html !== divData.html) {
+                console.log(`✅ AI optimized ${divData.id}: ${result.originalLength} → ${result.optimizedLength} bytes`);
+                return {
+                    templateKey,
+                    html: result.html,
+                    element: divData.element,
+                    optimized: true,
+                    id: divData.id
+                };
+            } else {
+                console.log(`🛡️ Using original ${divData.id}: ${result.error || 'No optimization'}`);
+                return {
+                    templateKey,
+                    html: divData.html,
+                    element: divData.element,
+                    optimized: false,
+                    id: divData.id
+                };
+            }
+        });
+
+        // Wait for all flex/grid elements in this batch to complete
+        const flexGridResults = await Promise.all(flexGridPromises);
+        
+        // Apply results
+        flexGridResults.forEach(result => {
+            componentTemplates[`{{${result.templateKey}}}`] = result.html;
+            $saved(result.element).replaceWith(`{{${result.templateKey}}}`);
+        });
+
+        processedInThisRound = true;
+        totalProcessed += currentBatch.length;
+        templateCounter += currentBatch.length;
+        
+        console.log(`✅ Completed batch of ${currentBatch.length} flex/grid divs concurrently`);
+        
+        if (processedInThisRound) {
+            $saved = cheerio.load($saved.html());
+        }
+    }
+
+    console.log(`\n🎯 Completed processing ${totalProcessed} flex/grid divs total (CONCURRENT MODE)`);
+
+    // Save final output
+    const finalBareHtml = $saved.html();
+    const bareMinimumFile = `bareminimum_section_${sectionIndex}.html`;
+    await fs.writeFile(path.join(outputDir, bareMinimumFile), finalBareHtml);
+    
+    const componentsJsonFile = `bareminimum_${sectionIndex}.json`;
+    await fs.writeFile(path.join(outputDir, componentsJsonFile), JSON.stringify(componentTemplates, null, 2));
+
+    console.log('\n🎉 Bare minimum HTML generation complete (CONCURRENT MODE)!');
+    console.log('📊 Summary:');
+    console.log(`   🎨 Background layers: ${bgLayerDivs.length} processed concurrently`);
+    console.log(`   📊 Flex/Grid divs: ${totalProcessed} processed in concurrent batches`);
+    console.log(`   📄 Files generated: ${bareMinimumFile}, ${bgJsonFile}, ${componentsJsonFile}`);
+    console.log('='.repeat(60));
+
+    return {
+        bareHtml: finalBareHtml,
+        bareMinimumFile,
+        bgJsonFile,
+        componentsJsonFile,
+        bgPlaceholderHtmlFile,
+        bgTemplates,
+        componentTemplates
+    };
+}
+// Helper functions for flex/grid processing
+function hasFlexOrGridProperties(element, $) {
+    const $element = $(element);
+    const style = $element.attr('style') || '';
+    const className = $element.attr('class') || '';
+    
+    const hasFlexInline = /display\s*:\s*(flex|inline-flex)/i.test(style) || 
+                         /flex[\s-]/i.test(style);
+    const hasGridInline = /display\s*:\s*(grid|inline-grid)/i.test(style) || 
+                         /grid[\s-]/i.test(style);
+    
+    const hasFlexClass = /flex|d-flex|display-flex/i.test(className);
+    const hasGridClass = /grid|d-grid|display-grid/i.test(className);
+    
+    return hasFlexInline || hasGridInline || hasFlexClass || hasGridClass;
+}
+
+function containsOnlyWidgets(element, $) {
+    const $element = $(element);
+    const childDivs = $element.find('div[id]');
+    
+    if (childDivs.length === 0) {
+        const id = $element.attr('id');
+        return id && (id.includes('widget') || id.includes('Widget'));
+    }
+    
+    let allChildrenAreWidgets = true;
+    childDivs.each((index, childElement) => {
+        const childId = $(childElement).attr('id');
+        if (!childId || (!childId.includes('widget') && !childId.includes('Widget'))) {
+            allChildrenAreWidgets = false;
+            return false;
+        }
+    });
+    
+    return allChildrenAreWidgets;
+}
+
+function getNestingDepth(element, $context) {
+    let depth = 0;
+    let current = $context(element);
+    while (current.parent('div[id]').length > 0) {
+        current = current.parent('div[id]').first();
+        depth++;
+    }
+    return depth;
+}
+// Worker thread processing - CORRECTED VERSION
+if (!isMainThread) {
+    (async () => {
+        try {
+            const { html, promptType, elementId } = workerData;
+            
+            if (!process.env.OPENAI_API_KEY) {
+                throw new Error('OpenAI API key not found');
+            }
+
+            const openai = new OpenAI({
+                apiKey: process.env.OPENAI_API_KEY
+            });
+
+            // Select correct prompt
+            let systemPrompt;
+            if (promptType === 'bgLayers') {
+                systemPrompt = BGLAYERS_OPTIMIZATION_PROMPT;
+            } else if (promptType === 'flexGrid') {
+                systemPrompt = FLEXGRID_OPTIMIZATION_PROMPT;
+            } else {
+                throw new Error(`Unknown prompt type: ${promptType}`);
+            }
+
+            console.log(`🤖 AI processing ${promptType} for ${elementId}`);
+
+            // Call OpenAI API
+            const response = await openai.chat.completions.create({
+                model: "gpt-4o-mini",
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: html }
+                ],
+                temperature: 0,
+                max_tokens: 12288,
+            });
+
+            let optimizedHtml = response.choices[0].message.content.trim();
+            
+            // Clean up response - remove code blocks if present
+            optimizedHtml = optimizedHtml
+                .replace(/^```html\s*/i, '')
+                .replace(/^```\s*/i, '')
+                .replace(/```\s*$/i, '')
+                .trim();
+
+            // Validate that we got HTML back
+            if (!optimizedHtml.includes('<') || optimizedHtml.length < 10) {
+                throw new Error('Invalid HTML response from AI');
+            }
+
+            console.log(`✅ AI optimized ${elementId} (${optimizedHtml.length} chars)`);
+            
+            parentPort.postMessage({ 
+                success: true, 
+                html: optimizedHtml,
+                originalLength: html.length,
+                optimizedLength: optimizedHtml.length
+            });
+
+        } catch (error) {
+            console.error(`❌ AI worker failed for ${workerData.elementId}:`, error.message);
+            parentPort.postMessage({ 
+                success: false, 
+                html: workerData.html,
+                error: error.message 
+            });
+        }
+    })();
+    return;
+}
 app.post('/migrate', async (req, res) => {
     console.log('\n=== MIGRATION REQUEST RECEIVED ===');
     console.log('Request body:', req.body);
@@ -92,7 +729,7 @@ app.post('/migrate', async (req, res) => {
         }
         
         // Step 3: Extract body content only from HTML
-        console.log('🔄 Extracting body content from HTML...');
+        console.log('📄 Extracting body content from HTML...');
         const $ = cheerio.load(htmlContent);
         
         // Get only body content
@@ -126,63 +763,150 @@ ${bodyContent}
         console.log('✅ Styles applied to HTML');
         
         // Step 5: Process HTML and extract components
-        console.log('🔄 STEP 5: Processing HTML and extracting components...');
+        console.log('📄 STEP 5: Processing HTML and extracting components...');
         const result = await processHtmlAndExtractComponents(processedHtml.styledHtml, __dirname);
         
-        console.log('\n🎉 COMPONENT EXTRACTION COMPLETED SUCCESSFULLY!');
+        // Step 6: Extract widgets from each component
+        console.log('\n🛠️ STEP 6: Extracting widgets from components...');
+        const widgetExtractions = [];
+        
+        for (const component of result.extractedComponents) {
+            if (component.found) {
+                const componentPath = path.join(__dirname, component.componentFile);
+                const componentHtml = await fs.readFile(componentPath, 'utf8');
+                
+                const widgetResult = await extractWidgetsFromHtml(
+                    componentHtml, 
+                    component.placeholderId.replace('wigoh-id-', ''), // Extract just the number
+                    path.join(__dirname, 'components')
+                );
+                
+                if (!widgetResult.failed) {
+                    widgetExtractions.push({
+                        componentId: component.placeholderId,
+                        widgetsFile: widgetResult.widgetsFile,
+                        htmlOutputFile: widgetResult.htmlOutputFile,
+                        widgetCount: Object.keys(widgetResult.widgets).length
+                    });
+                    
+                    // Update the component file with widget-extracted version
+                    await fs.writeFile(componentPath, widgetResult.modifiedHtml);
+                }
+            }
+        }
+
+        // Step 7: Generate bare minimum HTML
+               console.log('\n🛠️ STEP 7: Generating bare minimum HTML for ALL components CONCURRENTLY...');
+        
+        const bareMinimumPromises = result.extractedComponents
+            .filter(component => component.found)
+            .map(async (component) => {
+                const componentPath = path.join(__dirname, component.componentFile);
+                const componentHtml = await fs.readFile(componentPath, 'utf8');
+                
+                console.log(`⚡ Starting bare minimum generation for component ${component.placeholderId}...`);
+                
+                try {
+                    const bareMinimumResult = await generateBareMinimumHtml(
+                        component.placeholderId.replace('wigoh-id-', ''), // Extract just the number
+                        path.join(__dirname, 'components')
+                    );
+                    
+                    console.log(`✅ Completed bare minimum generation for component ${component.placeholderId}`);
+                    
+                    return {
+                        componentId: component.placeholderId,
+                        bareMinimumFile: bareMinimumResult.bareMinimumFile,
+                        bgJsonFile: bareMinimumResult.bgJsonFile,
+                        componentsJsonFile: bareMinimumResult.componentsJsonFile,
+                        success: true
+                    };
+                } catch (error) {
+                    console.error(`❌ Failed bare minimum generation for component ${component.placeholderId}:`, error.message);
+                    return {
+                        componentId: component.placeholderId,
+                        success: false,
+                        error: error.message
+                    };
+                }
+            });
+
+        // Wait for ALL bare minimum generations to complete
+        const bareMinimumResults = await Promise.all(bareMinimumPromises);
+        const successfulBareMinimum = bareMinimumResults.filter(result => result.success);
+        const failedBareMinimum = bareMinimumResults.filter(result => !result.success);
+        
+        console.log(`\n✅ Bare minimum generation completed:`);
+        console.log(`   - Successful: ${successfulBareMinimum.length}`);
+        console.log(`   - Failed: ${failedBareMinimum.length}`);
+        
+        if (failedBareMinimum.length > 0) {
+            console.log(`⚠️ Failed components:`, failedBareMinimum.map(f => f.componentId));
+        }
+        
+        // Step 8: Assemble final website
+        console.log('\n🛠️ STEP 8: Assembling Final Website...');
+        const finalAssemblyResult = await assembleFinalWebsite(__dirname);
+        
+        console.log('\n🎉 MIGRATION PROCESS COMPLETED SUCCESSFULLY WITH CONCURRENT PROCESSING!');
         console.log('📊 Final Statistics:');
         console.log(`   - Components extracted: ${result.extractedComponents.length}`);
         console.log(`   - Target IDs found: ${result.extractedComponents.filter(c => c.found).length}`);
-        console.log(`   - Original HTML with placeholders created`);
-        console.log(`   - HTML Source URL: ${htmlUrl}`);
-        console.log(`   - Styles Source URL: ${stylesUrl || 'None'}\n`);
+        console.log(`   - Widgets extracted: ${widgetExtractions.reduce((sum, w) => sum + w.widgetCount, 0)}`);
+        console.log(`   - Bare minimum HTML files generated: ${successfulBareMinimum.length}`);
+        console.log(`   - Failed bare minimum generations: ${failedBareMinimum.length}`);
+        console.log(`   - Final components assembled: ${finalAssemblyResult.componentsProcessed}/${finalAssemblyResult.totalPlaceholders}`);
+        console.log(`   - Final website created: ${finalAssemblyResult.finalWebsitePath}`);
+        console.log(`   - Processing mode: CONCURRENT ⚡`);
         
         res.json({
             success: true,
-            message: 'Component extraction completed successfully',
+            message: 'Migration completed successfully with concurrent AI processing',
             stats: {
                 componentsExtracted: result.extractedComponents.length,
                 targetIdsFound: result.extractedComponents.filter(c => c.found).length,
+                widgetsExtracted: widgetExtractions.reduce((sum, w) => sum + w.widgetCount, 0),
+                bareMinimumFilesGenerated: successfulBareMinimum.length,
+                failedBareMinimumFiles: failedBareMinimum.length,
+                finalComponentsAssembled: finalAssemblyResult.componentsProcessed,
+                totalPlaceholders: finalAssemblyResult.totalPlaceholders,
+                finalWebsiteSize: finalAssemblyResult.finalHtml.length,
+                processingMode: 'CONCURRENT',
                 htmlUrl: htmlUrl,
                 stylesUrl: stylesUrl || null,
                 extractedAt: new Date().toISOString(),
                 originalHtmlFile: result.originalHtmlFile,
-                styledHtmlFile: processedHtml.layoutInlineFile
+                styledHtmlFile: processedHtml.layoutInlineFile,
+                finalWebsiteFile: 'final_website.html'
             },
             components: result.extractedComponents,
+            widgetExtractions: widgetExtractions,
+            bareMinimumResults: successfulBareMinimum,
+            failedBareMinimumResults: failedBareMinimum,
+            finalAssembly: finalAssemblyResult,
             originalHtmlFile: result.originalHtmlFile,
             styledHtmlFile: processedHtml.layoutInlineFile
         });
         
     } catch (error) {
         console.error('\n❌ MIGRATION ERROR OCCURRED!');
-        console.error('📍 Error details:');
+        console.error('🔍 Error details:');
         console.error(`   - Error type: ${error.name}`);
         console.error(`   - Error message: ${error.message}`);
         console.error(`   - HTML URL: ${htmlUrl}`);
         console.error(`   - Styles URL: ${stylesUrl}`);
         console.error(`   - Timestamp: ${new Date().toISOString()}\n`);
         
-        let errorResponse = {
+        res.status(500).json({
             error: 'Migration failed',
             message: error.message,
             type: error.name,
             timestamp: new Date().toISOString(),
             urls: { htmlUrl, stylesUrl }
-        };
-        
-        if (error.message.includes('fetch failed') || error.message.includes('ENOTFOUND')) {
-            errorResponse.message = 'Cannot access one or both URLs. Please check that they are accessible and correct.';
-            errorResponse.suggestion = 'Verify both URLs are correct and accessible from the server';
-        } else if (error.message.includes('timeout')) {
-            errorResponse.message = 'Request timed out. The URLs took too long to respond.';
-            errorResponse.suggestion = 'Try again or check if the URLs are responsive';
-        }
-        
-        res.status(500).json(errorResponse);
+        });
     }
 });
-
+// - EnhancedHtmlStyleProcessor class
 class EnhancedHtmlStyleProcessor {
     constructor() {
         this.unmatchedElements = [];
@@ -530,8 +1254,7 @@ class EnhancedHtmlStyleProcessor {
             .join('\n');
     }
 }
-
-// Process HTML and extract components (HTML only, no JSON)
+// - processHtmlAndExtractComponents function
 async function processHtmlAndExtractComponents(fullPageHtml, outputDir) {
     console.log('📁 Creating components directory...');
     const componentsDir = path.join(outputDir, 'components');
@@ -727,8 +1450,7 @@ ${bodyContent}
         originalHtmlFile: originalHtmlFilename
     };
 }
-
-// Create clean component HTML
+// - createCleanComponentHTML function
 function createCleanComponentHTML(componentHtml, originalId, placeholderId) {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -741,8 +1463,7 @@ ${componentHtml}
 </body>
 </html>`;
 }
-
-// Create not found component HTML
+// - createNotFoundComponentHTML function
 function createNotFoundComponentHTML(originalId, placeholderId) {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -780,7 +1501,399 @@ function createNotFoundComponentHTML(originalId, placeholderId) {
 </html>`;
 }
 
-// Health check endpoint
+// Global variables for tracking completed sections
+const completedSections = new Map();
+let browserProcess = null;
+
+// WebsiteBuilder class adapted for your file structure
+class WebsiteBuilder {
+    constructor(outputDir, componentId) {
+        this.outputDir = outputDir;
+        this.componentsDir = path.join(outputDir, 'components');
+        this.componentId = componentId; // e.g., "001" from wigoh-id-001
+        this.templateFile = path.join(this.componentsDir, `bareminimum_section_${componentId}.html`);
+        this.data1File = path.join(this.componentsDir, `bg_${componentId}.json`);
+        this.data2File = path.join(this.componentsDir, `bareminimum_${componentId}.json`);
+        this.data3File = path.join(this.componentsDir, `widgets_${componentId}.json`);
+        this.currentHTML = '';
+        this.data1 = {}; // Background data
+        this.data2 = {}; // Bareminimum templates
+        this.data3 = {}; // Widgets data
+    }
+
+    async loadData() {
+        try {
+            // Load data1 (background data - bg_*.json)
+            if (await fs.access(this.data1File).then(() => true).catch(() => false)) {
+                const data1Content = await fs.readFile(this.data1File, 'utf8');
+                this.data1 = JSON.parse(data1Content);
+            }
+
+            // Load data2 (bareminimum templates - template-nnnn format)
+            if (await fs.access(this.data2File).then(() => true).catch(() => false)) {
+                const data2Content = await fs.readFile(this.data2File, 'utf8');
+                this.data2 = JSON.parse(data2Content);
+            }
+
+            // Load data3 (widgets - {{widget-n}} format keys with HTML values)
+            if (await fs.access(this.data3File).then(() => true).catch(() => false)) {
+                const data3Content = await fs.readFile(this.data3File, 'utf8');
+                this.data3 = JSON.parse(data3Content);
+            }
+
+            console.log(`📁 Data loaded for component ${this.componentId}:`);
+            console.log(`   🎨 Background layers: ${Object.keys(this.data1).length}`);
+            console.log(`   📐 Templates: ${Object.keys(this.data2).length}`);
+            console.log(`   🔧 Widgets: ${Object.keys(this.data3).length}`);
+        } catch (error) {
+            console.error(`❌ Error loading data for component ${this.componentId}:`, error);
+            throw error;
+        }
+    }
+
+    processTemplates(content) {
+        if (!content || typeof content !== 'string') return content;
+
+        let processedContent = content;
+        let hasReplacements = true;
+        let iterations = 0;
+        const maxIterations = 30;
+
+        while (hasReplacements && iterations < maxIterations) {
+            hasReplacements = false;
+            iterations++;
+
+            // First pass: Replace {{template-nnnn}} patterns with data2 (bareminimum) content
+            const templateMatches = processedContent.match(/\{\{template-\d+\}\}/g);
+            if (templateMatches) {
+                for (const match of templateMatches) {
+                    if (this.data2[match]) {
+                        processedContent = processedContent.replace(match, this.data2[match]);
+                        hasReplacements = true;
+                        console.log(`    🔄 Replaced ${match} (template)`);
+                    } else {
+                        const templateId = match.replace(/[{}]/g, '');
+                        if (this.data2[templateId]) {
+                            processedContent = processedContent.replace(match, this.data2[templateId]);
+                            hasReplacements = true;
+                            console.log(`    🔄 Replaced ${match} -> ${templateId} (template)`);
+                        }
+                    }
+                }
+            }
+
+            // Second pass: Replace {{widget-n}} patterns with data3 (widgets) content
+            const widgetMatches = processedContent.match(/\{\{widget-\d+\}\}/g);
+            if (widgetMatches) {
+                for (const match of widgetMatches) {
+                    if (this.data3[match]) {
+                        processedContent = processedContent.replace(match, this.data3[match]);
+                        hasReplacements = true;
+                        console.log(`    🔄 Replaced ${match} (widget)`);
+                    } else {
+                        const widgetId = match.replace(/[{}]/g, '');
+                        if (this.data3[widgetId]) {
+                            processedContent = processedContent.replace(match, this.data3[widgetId]);
+                            hasReplacements = true;
+                            console.log(`    🔄 Replaced ${match} -> ${widgetId} (widget)`);
+                        }
+                    }
+                }
+            }
+
+            // Third pass: Replace {{bg-nn}} background patterns with data1 content
+            const bgMatches = processedContent.match(/\{\{bg-\d+\}\}/g);
+            if (bgMatches) {
+                for (const match of bgMatches) {
+                    if (this.data1[match]) {
+                        processedContent = processedContent.replace(match, this.data1[match]);
+                        hasReplacements = true;
+                        console.log(`    🔄 Replaced ${match} (background)`);
+                    } else {
+                        const bgId = match.replace(/[{}]/g, '');
+                        if (this.data1[bgId]) {
+                            processedContent = processedContent.replace(match, this.data1[bgId]);
+                            hasReplacements = true;
+                            console.log(`    🔄 Replaced ${match} -> ${bgId} (background)`);
+                        }
+                    }
+                }
+            }
+
+            // Fourth pass: Handle any other placeholder patterns
+            const otherMatches = processedContent.match(/\{\{[^}]+\}\}/g);
+            if (otherMatches) {
+                for (const match of otherMatches) {
+                    let replaced = false;
+                    
+                    // Check all data sources
+                    [this.data1, this.data2, this.data3].forEach((dataSource, index) => {
+                        if (!replaced && dataSource[match]) {
+                            processedContent = processedContent.replace(match, dataSource[match]);
+                            hasReplacements = true;
+                            replaced = true;
+                            console.log(`    🔄 Replaced ${match} (data${index + 1})`);
+                        }
+                        
+                        if (!replaced) {
+                            const withoutBraces = match.replace(/[{}]/g, '');
+                            if (dataSource[withoutBraces]) {
+                                processedContent = processedContent.replace(match, dataSource[withoutBraces]);
+                                hasReplacements = true;
+                                replaced = true;
+                                console.log(`    🔄 Replaced ${match} -> ${withoutBraces} (data${index + 1})`);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        if (iterations >= maxIterations) {
+            console.warn(`⚠️ Maximum iterations reached for component ${this.componentId}`);
+        }
+
+        return processedContent;
+    }
+
+    cleanupHTML(html) {
+        let cleaned = html;
+        cleaned = cleaned.replace(/(\w+)=([^"'\s>]+)/g, '$1="$2"');
+        cleaned = cleaned.replace(/&quot;/g, '"');
+        return cleaned;
+    }
+
+    validatePlaceholders(html) {
+        const remainingPlaceholders = html.match(/\{\{[^}]+\}\}/g);
+        if (remainingPlaceholders) {
+            console.warn(`⚠️ Unresolved placeholders in component ${this.componentId}:`, remainingPlaceholders);
+            return false;
+        }
+        return true;
+    }
+
+    async buildComponent() {
+        try {
+            await this.loadData();
+            
+            console.log(`📖 Reading template: bareminimum_section_${this.componentId}.html`);
+            const templateContent = await fs.readFile(this.templateFile, 'utf8');
+            
+            console.log(`🔄 Processing templates for component ${this.componentId}...`);
+            let finalHtml = this.processTemplates(templateContent);
+            finalHtml = this.cleanupHTML(finalHtml);
+            
+            const isValid = this.validatePlaceholders(finalHtml);
+            if (!isValid) {
+                console.warn(`⚠️ Some placeholders remain in component ${this.componentId}`);
+            }
+            
+            this.currentHTML = finalHtml;
+            console.log(`✅ Component ${this.componentId} built (${finalHtml.length} bytes)`);
+            
+            return finalHtml;
+        } catch (error) {
+            console.error(`❌ Build failed for component ${this.componentId}:`, error);
+            throw error;
+        }
+    }
+
+    getStats() {
+        return {
+            componentId: this.componentId,
+            backgroundLayers: Object.keys(this.data1).length,
+            templates: Object.keys(this.data2).length,
+            widgets: Object.keys(this.data3).length,
+            finalHTMLLength: this.currentHTML.length,
+            hasUnresolvedPlaceholders: !this.validatePlaceholders(this.currentHTML)
+        };
+    }
+}
+
+// Process individual component
+async function assembleFinalComponent(componentId, outputDir) {
+    console.log(`\n🏗️ Assembling component: wigoh-id-${componentId}`);
+    
+    try {
+        const builder = new WebsiteBuilder(outputDir, componentId);
+        const finalHtml = await builder.buildComponent();
+        
+        // Store the completed component
+        completedSections.set(componentId, {
+            id: componentId,
+            html: finalHtml,
+            completed: true,
+            stats: builder.getStats()
+        });
+        
+        console.log(`✅ Component wigoh-id-${componentId} assembled successfully`);
+        return finalHtml;
+        
+    } catch (error) {
+        console.error(`❌ Failed to assemble component ${componentId}:`, error.message);
+        completedSections.set(componentId, {
+            id: componentId,
+            error: error.message,
+            failed: true
+        });
+        throw error;
+    }
+}
+
+// Assemble final website from original HTML with placeholders
+async function assembleFinalWebsite(outputDir) {
+    console.log('\n🌐 STEP 8: Assembling Final Website');
+    console.log('='.repeat(60));
+    
+    try {
+        // Read the original HTML with placeholders
+        const originalHtmlPath = path.join(outputDir, 'original_with_placeholders.html');
+        if (!await fs.access(originalHtmlPath).then(() => true).catch(() => false)) {
+            throw new Error('Original HTML with placeholders not found');
+        }
+        
+        const originalHtml = await fs.readFile(originalHtmlPath, 'utf8');
+        console.log(`📄 Loaded original HTML (${originalHtml.length} bytes)`);
+        
+        // Extract body content
+        const $ = cheerio.load(originalHtml);
+        let bodyContent = $('body').html() || '';
+        
+        console.log('🔍 Found placeholders in original HTML:');
+        const placeholders = bodyContent.match(/\{\{wigoh-id-\d+\}\}/g) || [];
+        placeholders.forEach(placeholder => {
+            console.log(`   📍 ${placeholder}`);
+        });
+        
+        if (placeholders.length === 0) {
+            console.log('⚠️ No component placeholders found in original HTML');
+            return {
+                finalHtml: originalHtml,
+                componentsProcessed: 0
+            };
+        }
+        
+        // Process each component placeholder
+        let processedContent = bodyContent;
+        let componentsProcessed = 0;
+        
+        for (const placeholder of placeholders) {
+            const componentIdMatch = placeholder.match(/wigoh-id-(\d+)/);
+            if (!componentIdMatch) continue;
+            
+            const componentId = componentIdMatch[1];
+            console.log(`\n🔄 Processing placeholder: ${placeholder} (component ${componentId})`);
+            
+            try {
+                // Check if component was already processed
+                if (!completedSections.has(componentId)) {
+                    await assembleFinalComponent(componentId, outputDir);
+                }
+                
+                const componentData = completedSections.get(componentId);
+                if (componentData && componentData.html && !componentData.failed) {
+                    // Replace placeholder with processed component HTML
+                    processedContent = processedContent.replace(placeholder, componentData.html);
+                    componentsProcessed++;
+                    console.log(`   ✅ Replaced ${placeholder} with assembled component`);
+                } else {
+                    console.warn(`   ⚠️ Component ${componentId} failed or has no HTML`);
+                }
+            } catch (error) {
+                console.error(`   ❌ Error processing component ${componentId}: ${error.message}`);
+            }
+        }
+        
+        // Create final HTML structure
+        const finalHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Final Assembled Website</title>
+</head>
+<body>
+${processedContent}
+</body>
+</html>`;
+        
+        // Save final website
+        const finalWebsitePath = path.join(outputDir, 'final_website.html');
+        await fs.writeFile(finalWebsitePath, finalHtml, 'utf8');
+        
+        console.log('\n🎉 Final Website Assembly Complete!');
+        console.log(`📄 Final HTML: ${finalWebsitePath}`);
+        console.log(`📊 Components processed: ${componentsProcessed}/${placeholders.length}`);
+        console.log(`📏 Final size: ${finalHtml.length} bytes`);
+        
+        // Update browser display
+        await updateBrowserDisplay(outputDir, true);
+        
+        return {
+            finalHtml,
+            finalWebsitePath,
+            componentsProcessed,
+            totalPlaceholders: placeholders.length,
+            componentStats: Array.from(completedSections.values())
+                .filter(comp => comp.completed && comp.stats)
+                .map(comp => comp.stats)
+        };
+        
+    } catch (error) {
+        console.error('❌ Final website assembly failed:', error);
+        throw error;
+    }
+}
+
+// Update browser display function
+async function updateBrowserDisplay(outputDir, shouldOpenBrowser = false) {
+    try {
+        const finalHtmlPath = path.join(outputDir, 'final_website.html');
+        if (!await fs.access(finalHtmlPath).then(() => true).catch(() => false)) {
+            console.log('⏳ Final HTML not ready for display');
+            return;
+        }
+
+        const finalHtml = await fs.readFile(finalHtmlPath, 'utf8');
+        const tempFile = path.join(outputDir, 'browser_preview.html');
+        await fs.writeFile(tempFile, finalHtml);
+        
+        const fullPath = path.resolve(tempFile);
+        const fileUrl = `file://${fullPath}`;
+        
+        if (shouldOpenBrowser) {
+            const platform = process.platform;
+            let command;
+            
+            if (platform === 'win32') {
+                command = `start "" "${fileUrl}"`;
+            } else if (platform === 'darwin') {
+                command = `open "${fileUrl}"`;
+            } else {
+                command = `xdg-open "${fileUrl}"`;
+            }
+            
+            try {
+                const { exec } = require('child_process');
+                const { promisify } = require('util');
+                const execPromise = promisify(exec);
+                
+                await execPromise(command);
+                console.log('🌐 Browser opened with final website');
+                console.log(`🔗 URL: ${fileUrl}`);
+            } catch (error) {
+                console.log(`🔗 Final website available at: ${fileUrl}`);
+            }
+        } else {
+            console.log(`🔗 Browser preview updated: ${fileUrl}`);
+        }
+    } catch (error) {
+        console.error('❌ Error updating browser display:', error);
+    }
+}
+
+
+// - Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'OK', 
@@ -788,10 +1901,9 @@ app.get('/health', (req, res) => {
         version: '6.0.0-html-components-only'
     });
 });
-
 // Start server
 app.listen(PORT, () => {
-    console.log('\n🚀 HTML COMPONENT EXTRACTOR V6.0 (HTML COMPONENTS ONLY)');
+    console.log('\n🚀 HTML COMPONENT EXTRACTOR V7.0 (FULL PROCESSING PIPELINE)');
     console.log('═══════════════════════════════════════════════════════════════════════════');
     console.log(`🌐 Server URL: http://localhost:${PORT}`);
     console.log(`📅 Started at: ${new Date().toISOString()}`);
@@ -799,36 +1911,40 @@ app.listen(PORT, () => {
     console.log('   ✅ HTML URL input (required)');
     console.log('   ✅ Optional styles URL for style processing');
     console.log('   ✅ HTML component extraction');
+    console.log('   ✅ Widget extraction from components');
+    console.log('   ✅ Background layers optimization');
+    console.log('   ✅ Flex/Grid div optimization');
+    console.log('   ✅ Bare minimum HTML generation');
     console.log('   ✅ Target ID components (BACKGROUND_GROUP, pinned elements)');
     console.log('   ✅ Top-level section components');
     console.log('   ✅ Placeholder replacement in original HTML');
     console.log('\n📁 OUTPUT:');
     console.log('   - original_with_placeholders.html');
     console.log('   - components/ (HTML component files)');
+    console.log('   - widgets_*.json (extracted widgets for each component)');
+    console.log('   - widgets_extracted_*.html (component HTML with widget placeholders)');
+    console.log('   - bg_*.json (optimized background layers)');
+    console.log('   - bareminimum_*.json (optimized flex/grid components)');
+    console.log('   - bareminimum_section_*.html (final optimized HTML)');
     console.log('   - layout_inlineStyles_0.html (with styles applied if styles URL provided)');
     console.log('═══════════════════════════════════════════════════════════════════════════\n');
 });
-
 // Error handling
 app.on('error', (error) => {
     console.error('\n❌ SERVER ERROR:', error);
 });
-
 process.on('uncaughtException', (error) => {
     console.error('\n❌ UNCAUGHT EXCEPTION:', error);
     console.log('Server will continue running...\n');
 });
-
 process.on('unhandledRejection', (reason, promise) => {
     console.error('\n❌ UNHANDLED PROMISE REJECTION:', reason);
     console.log('Server will continue running...\n');
 });
-
 process.on('SIGINT', () => {
     console.log('\nShutting down server gracefully...');
     process.exit(0);
 });
-
 process.on('SIGTERM', () => {
     console.log('\nShutting down server gracefully...');
     process.exit(0);
