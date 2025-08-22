@@ -31,8 +31,9 @@ app.get('/', (req, res) => {
 const WIDGET_ELEMENTS = [
     'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'svg', 'img', 'image', 
     'video', 'span', 'button', 'a', 'text', 'wow-image', 'wix-video', 
-    'wow-svg', 'wow-icon', 'wow-canvas'
+    'wow-svg', 'wow-icon', 'wow-canvas', 'main'
 ];
+
 // Extract widgets from HTML content
 async function extractWidgetsFromHtml(htmlContent, sectionIndex, outputDir) {
     try {
@@ -41,11 +42,32 @@ async function extractWidgetsFromHtml(htmlContent, sectionIndex, outputDir) {
         const widgets = {};
         let widgetCounter = 1;
 
+        function isInsideSection(element) {
+            let parent = element.parentElement;
+            while (parent) {
+                if (parent.tagName && parent.tagName.toLowerCase() === 'section') {
+                    return true;
+                }
+                parent = parent.parentElement;
+            }
+            return false;
+        }
+
         function processElement(element) {
             if (element.nodeType === 1) { // Element node
                 const tagName = element.tagName.toLowerCase();
                 
                 if (WIDGET_ELEMENTS.includes(tagName)) {
+                    // Special handling for main tags - only extract if inside section
+                    if (tagName === 'main') {
+                        if (!isInsideSection(element)) {
+                            // Don't extract main tag, but process its children
+                            const children = Array.from(element.childNodes);
+                            children.forEach(child => processElement(child));
+                            return;
+                        }
+                    }
+                    
                     const widgetKey = `{{widget-${widgetCounter}}}`;
                     widgets[widgetKey] = element.outerHTML;
                     
@@ -89,120 +111,160 @@ async function extractWidgetsFromHtml(htmlContent, sectionIndex, outputDir) {
 }
 // Background layers optimization prompt
 const BGLAYERS_OPTIMIZATION_PROMPT = `
-You are optimizing Wix bgLayers HTML. Your goal is to reduce the number of divs while STRICTLY preserving ALL visual properties.
+You optimize Wix bgLayers HTML. Goal: **reduce the number of <div> elements** while preserving **pixel-perfect identical** rendering.
 
-CRITICAL RULES:
-1. OUTPUT ONLY THE OPTIMIZED HTML - NO EXPLANATIONS OR COMMENTS
-2. ALWAYS merge ALL classes from child divs into the parent div's class attribute
-3. ALWAYS merge ALL styles from child divs into the parent div's style attribute
-4. When merging styles, if parent and child have the same CSS property, use the child's value (child overrides parent)
-5. PRESERVE ALL BACKGROUND PROPERTIES: background-color, background-image, background-size, background-position, background-repeat
-6. PRESERVE ALL POSITIONING: position, top, left, right, bottom, z-index, transform, inset-*
-7. PRESERVE ALL DIMENSIONS: width, height, min-width, min-height, max-width, max-height, block-size, inline-size
-8. PRESERVE ALL VISUAL EFFECTS: opacity, overflow, overflow-x, overflow-y, overflow-block, overflow-inline, mask-position, mask-repeat, mask-size, filter, perspective-origin, transform-origin
-9. If bgMedia div is EMPTY (no content) or only contains empty divs, completely remove it
-10. If colorUnderlay exists, merge its background-color and all other properties into the main div
-11. Keep all data-* attributes on the main div
+🚨 OUTPUT:
+- OUTPUT ONLY the optimized HTML (no explanations, no comments).
 
-MERGING PROCESS:
-- Collect ALL class names from parent and ALL children → combine into single class attribute
-- Collect ALL style properties from parent and ALL children → combine into single style attribute  
-- Remove duplicate CSS properties, keeping the most specific/last value
-- Maintain the main div's data attributes and ID
+✅ ALWAYS-REDUCE CONTRACT:
+- You MUST reduce the total <div> count by at least 2 per bg-layer scope processed.
+- If a specific merge is unsafe, you MUST find a different safe merge elsewhere in the same scope (e.g., remove empty wrappers, fold neutral wrappers, merge duplicated layers).
+- Do not stop until the minimum reduction is achieved.
 
+📌 DO-NOT-MERGE ACROSS THESE CONTEXTS (identify and respect as boundaries):
+- Positioning contexts: position: relative|absolute|sticky|fixed
+- Stacking/containing contexts: z-index (non-auto), isolation:isolate, transform/perspective, filter/backdrop-filter, mix-blend-mode, will-change
+- Clipping/masking/scroll: overflow/overflow-*, clip-path, mask-*, background-attachment:fixed
+- Media containers: <wow-image>, <img>, <video>, <canvas>, <svg>, <picture> (do NOT unwrap or reorder)
+- Template markers: {{template-XXXX}} (preserve order and exact placement)
 
-The output must render PIXEL-PERFECT identical to the input.
+📌 MUST PRESERVE (verbatim):
+- Background: background-color, background-image, background-size, background-position, background-repeat
+- Positioning: position, top, left, right, bottom, inset-*, z-index, transform, transform-origin, perspective-origin
+- Dimensions: width, height, min/max/inline/block sizes
+- Visual/flow: opacity, visibility, overflow/overflow-*, object-fit, object-position, filter, backdrop-filter
+- Attributes: main container id; ALL data-* attributes on kept nodes
+- DOM order of visible nodes (no reordering)
 
-OUTPUT ONLY THE OPTIMIZED HTML:
+⚡ PRIORITIZED REDUCTION STRATEGY (apply in this order until at least one reduction is achieved):
+1) **Remove empty wrappers:** delete any <div> with no visible content and no computed effect (no styles that change layout/stacking/clipping/transform).
+2) **Fold purely-neutral wrappers:** merge wrappers that only duplicate parent sizing/positioning with no unique effects. Move their classes/styles to the kept node.
+3) **Merge color underlay:** if a sibling \`[data-testid="colorUnderlay"]\` has only background-* and the same full-bleed sizing/positioning, move its background-* onto the main bgLayer container and remove the underlay div. (Do NOT move opacity/filter/blend; if present, skip this step and continue with other reductions.)
+4) **Eliminate duplicate style layers:** if parent and child have identical position/size and no conflicting context properties, move child styles/classes to parent and remove child.
+5) **Prune duplicated CSS properties:** while merging, dedupe style keys; on conflicts, child value wins.
+
+🧩 MERGING RULES:
+- When keeping the parent: move ALL child classes into parent’s class attribute.
+- Move ALL safe child styles into parent’s style.
+- Never remove or unwrap <wow-image>/<img>/<video> or change their sticky/absolute context.
+- Never change siblings' order; never change visibility.
+
+🎯 FINAL CHECK (must pass):
+- At least one <div> removed in this bg-layer scope.
+- Visual output **pixel-perfect identical** to input.
+
+👉 OUTPUT: ONLY the optimized HTML
 `;
 // Flex grid optimization prompt
 const FLEXGRID_OPTIMIZATION_PROMPT = `
-You are a Wix HTML optimization expert. REDUCE div count while maintaining PIXEL-PERFECT IDENTICAL rendering.
+You are optimizing Wix Flex/Grid HTML. Your goal: **reduce div count** while preserving **pixel-perfect identical rendering**.
 
-ULTRA-STRICT PRESERVATION RULES:
-1. OUTPUT ONLY THE OPTIMIZED HTML - NO EXPLANATIONS
-2. PRESERVE ALL LAYOUT PROPERTIES: display, flex-direction, justify-content, align-items, gap
-3. PRESERVE ALL POSITIONING: position, top, left, right, bottom, transform, z-index
-4. PRESERVE ALL SPACING: margin, margin-top, margin-left, margin-right, margin-bottom, padding (all variants)
-5. PRESERVE ALL DIMENSIONS: width, height, min/max constraints
-6. PRESERVE ALL VISUAL: overflow, opacity, visibility, filter, backdrop-filter
-7. PRESERVE ALL GRID: grid-template-columns, grid-template-rows, grid-gap, grid-area
-8. Keep ALL template placeholders: {{template-XXXX}} in exact same positions
-9. Merge classes and attributes safely without conflicts
+🚨 OUTPUT RULE:
+- OUTPUT ONLY the optimized HTML (no explanations).
 
-CRITICAL FLEX/GRID SAFETY:
-- display:flex MUST be preserved
-- display:grid MUST be preserved  
-- flex-direction MUST be preserved
-- justify-content MUST be preserved
-- align-items MUST be preserved
-- grid-template-columns/rows MUST be preserved
-- gap/grid-gap MUST be preserved
-- flex-wrap MUST be preserved
+📌 STRICT PRESERVATION:
+1. Layout properties → display, flex-direction, flex-wrap, justify-content, align-items, gap, grid-template-columns, grid-template-rows, grid-area, grid-gap
+2. Positioning → position, top, left, right, bottom, transform, z-index
+3. Spacing → margin (all sides), padding (all sides), border
+4. Dimensions → width, height, min/max constraints
+5. Visual → overflow, opacity, visibility, filter, backdrop-filter
+6. Template placeholders (\`{{template-XXXX}}\`) → must stay in same position and order.
+7. Merge classes + attributes safely, no loss.
 
-CRITICAL SPACING SAFETY:
-- margin properties affect other elements - MUST preserve
-- padding affects inner content positioning - MUST preserve
-- border affects dimensions - MUST preserve
+⚡ DIV REDUCTION STRATEGY:
+- Aggressively flatten unnecessary wrappers:
+  - 2 divs → 1
+  - 3 divs → 1
+  - 5 divs → 2 maximum
+- Merge parent-child divs ONLY if positioning/sizing remains identical.
+- Move all wrapper properties into parent or child safely.
+- Use shorthand CSS if possible but keep exact values.
 
-AGGRESSIVE DIV REDUCTION: 2 divs → 1 div, 3 divs → 1 div, 5 divs → 2 divs maximum
+📌 POSITIONING SAFETY:
+- Parent’s positioning context MUST be preserved for absolute/fixed children.
+- \`transform\`, \`transform-origin\` MUST be preserved (for animations).
+- Any layout shift is forbidden.
 
-DIV REDUCTION STRATEGIES (WITH POSITIONING SAFETY):
-- Merge parent-child divs ONLY if all positioning/sizing properties are preserved
-- Eliminate wrapper divs by moving ALL their properties to child or parent
-- Combine properties without losing any layout information
-- Use CSS shorthand but maintain exact values
-- Flatten nesting while preserving exact positioning chain
-
-EXAMPLE 1 - REDUCE 3 DIVS TO 2 DIVS (SAFE POSITIONING):
-INPUT (3 divs):
-<div id="parent" class="flex-container" style="display: flex; height: 200px; width: 400px; position: relative;">
-  <div class="wrapper" style="position: relative; height: 200px; width: 400px; padding: 20px;">
-    <div id="child" class="content" style="height: 100px; width: 200px; position: absolute; top: 50px; left: 100px; margin: 10px;">
+✅ Example (3 → 2 divs):
+INPUT:
+<div id="parent" class="flex-container" style="display:flex;height:200px;width:400px;position:relative;">
+  <div class="wrapper" style="position:relative;height:200px;width:400px;padding:20px;">
+    <div id="child" class="content" style="height:100px;width:200px;position:absolute;top:50px;left:100px;margin:10px;">
       {{template-2001}}
     </div>
   </div>
 </div>
 
-OUTPUT (2 divs - ALL properties preserved):
-<div id="parent" class="flex-container wrapper" style="display:flex;height:200px;width:400px;position:relative;padding:20px">
-<div id="child" class="content" style="height:100px;width:200px;position:absolute;top:50px;left:100px;margin:10px">{{template-2001}}</div>
+OUTPUT:
+<div id="parent" class="flex-container wrapper" style="display:flex;height:200px;width:400px;position:relative;padding:20px;">
+  <div id="child" class="content" style="height:100px;width:200px;position:absolute;top:50px;left:100px;margin:10px;">{{template-2001}}</div>
 </div>
 
-WIDGET POSITIONING PROTECTION:
-- Template placeholders {{template-XXXX}} positioning MUST be identical
-- Parent positioning context MUST be maintained for absolute children
-- Transform and transform-origin MUST be kept for animations
+🎯 Final check: Output must be **pixel-perfect identical** to input.
 
-The output must be VISUALLY IDENTICAL. Any layout shift is forbidden.
-
-HTML TO OPTIMIZE:
+👉 OUTPUT: ONLY the optimized HTML
 `;
-async function optimizeWithAI(html, promptType, elementId) {
-    return new Promise((resolve) => {
-        const worker = new Worker(__filename, {
-            workerData: { html, promptType, elementId }
-        });
-
-        const timeout = setTimeout(() => {
-            worker.terminate();
-            console.warn(`⏱️ AI timeout for ${elementId} - using original HTML`);
-            resolve({ success: false, html: html, error: 'Timeout' });
-        }, 120000); // 2 minute timeout
-
-        worker.on('message', (result) => {
-            clearTimeout(timeout);
-            resolve(result);
-        });
-
-        worker.on('error', (error) => {
-            clearTimeout(timeout);
-            console.error(`❌ AI worker error for ${elementId}:`, error.message);
-            resolve({ success: false, html: html, error: error.message });
-        });
-    });
+async function optimizeWithAI(html, promptType, elementId, maxRetries = 2) {
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            console.log(`🤖 AI optimization attempt ${attempt}/${maxRetries} for ${elementId}`);
+            
+            return new Promise((resolve, reject) => {
+                const worker = new Worker(__filename, {
+                    workerData: { html, promptType, elementId }
+                });
+                
+                // Set timeout for individual AI calls
+                const timeout = setTimeout(() => {
+                    worker.terminate();
+                    reject(new Error(`AI optimization timeout for ${elementId}`));
+                }, 60000); // 60 second timeout per element
+                
+                worker.on('message', (result) => {
+                    clearTimeout(timeout);
+                    worker.terminate();
+                    resolve(result);
+                });
+                
+                worker.on('error', (error) => {
+                    clearTimeout(timeout);
+                    worker.terminate();
+                    reject(error);
+                });
+                
+                worker.on('exit', (code) => {
+                    clearTimeout(timeout);
+                    if (code !== 0) {
+                        reject(new Error(`Worker stopped with exit code ${code} for ${elementId}`));
+                    }
+                });
+            });
+        } catch (error) {
+            lastError = error;
+            console.warn(`⚠️ AI optimization attempt ${attempt} failed for ${elementId}: ${error.message}`);
+            
+            if (attempt === maxRetries) {
+                console.error(`❌ All AI optimization attempts failed for ${elementId}`);
+                return {
+                    success: false,
+                    html: html,
+                    error: error.message
+                };
+            }
+            
+            // Brief delay before retry
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        }
+    }
+    
+    return {
+        success: false,
+        html: html,
+        error: lastError?.message || 'Unknown error'
+    };
 }
-
 // Check if element is a critical bgLayer div
 function isCriticalBgLayerDiv(htmlString) {
     // Simple check for positioning or background properties
@@ -302,8 +364,8 @@ async function generateBareMinimumHtml(sectionIndex, outputDir) {
     const widgetsHtml = await fs.readFile(widgetsHtmlPath, 'utf8');
     console.log(`✅ Found widgets-extracted HTML (${widgetsHtml.length} bytes)`);
 
-    // **STEP 1: Process bgLayers divs with AI**
-    console.log('\n🎨 Processing bgLayers divs with AI optimization...');
+    // **STEP 1: Process bgLayers divs with AI CONCURRENTLY**
+    console.log('\n🎨 Processing bgLayers divs with AI optimization (CONCURRENT MODE)...');
     const $ = cheerio.load(widgetsHtml);
     const bgLayerDivs = [];
     
@@ -319,34 +381,58 @@ async function generateBareMinimumHtml(sectionIndex, outputDir) {
     console.log(`Found ${bgLayerDivs.length} bgLayers divs`);
     const bgTemplates = {};
 
-    // Process bgLayers with AI
-    for (let i = 0; i < bgLayerDivs.length; i++) {
-        const divData = bgLayerDivs[i];
-        const bgKey = `bg-${String(i + 1).padStart(2, '0')}`;
+    // Process all bgLayers CONCURRENTLY
+    if (bgLayerDivs.length > 0) {
+        console.log(`\n⚡ Processing ${bgLayerDivs.length} bgLayers divs concurrently...`);
         
-        console.log(`\n🔧 Processing bgLayers ${i + 1}/${bgLayerDivs.length}: ${divData.id}`);
+        const bgPromises = bgLayerDivs.map(async (divData, index) => {
+            const bgKey = `bg-${String(index + 1).padStart(2, '0')}`;
+            
+            // Check size before sending to AI
+            const sizeInBytes = Buffer.byteLength(divData.html, 'utf8');
+            if (sizeInBytes > 10000) {
+                console.warn(`📏 Div ${divData.id} too large (${sizeInBytes} bytes), saving intact`);
+                return {
+                    bgKey,
+                    html: divData.html,
+                    element: divData.element,
+                    optimized: false
+                };
+            }
+            
+            // Use AI optimization for bgLayers
+            console.log(`🤖 Starting AI optimization for ${divData.id}...`);
+            const result = await optimizeWithAI(divData.html, 'bgLayers', divData.id);
+            
+            if (result.success && result.html && result.html !== divData.html) {
+                console.log(`✅ AI optimized ${divData.id}: ${result.originalLength} → ${result.optimizedLength} bytes`);
+                return {
+                    bgKey,
+                    html: result.html,
+                    element: divData.element,
+                    optimized: true
+                };
+            } else {
+                console.log(`🛡️ Using original ${divData.id}: ${result.error || 'No optimization'}`);
+                return {
+                    bgKey,
+                    html: divData.html,
+                    element: divData.element,
+                    optimized: false
+                };
+            }
+        });
+
+        // Wait for all bgLayers to complete
+        const bgResults = await Promise.all(bgPromises);
         
-        // Check size before sending to AI
-        const sizeInBytes = Buffer.byteLength(divData.html, 'utf8');
-        if (sizeInBytes > 10000) {
-            console.warn(`📏 Div ${divData.id} too large (${sizeInBytes} bytes), saving intact`);
-            bgTemplates[`{{${bgKey}}}`] = divData.html;
-            $(divData.element).replaceWith(`{{${bgKey}}}`);
-            continue;
-        }
-        
-        // Use AI optimization for bgLayers
-        const result = await optimizeWithAI(divData.html, 'bgLayers', divData.id);
-        
-        if (result.success && result.html && result.html !== divData.html) {
-            console.log(`✅ AI optimized ${divData.id}: ${result.originalLength} → ${result.optimizedLength} bytes`);
-            bgTemplates[`{{${bgKey}}}`] = result.html;
-        } else {
-            console.log(`🛡️ Using original ${divData.id}: ${result.error || 'No optimization'}`);
-            bgTemplates[`{{${bgKey}}}`] = divData.html;
-        }
-        
-        $(divData.element).replaceWith(`{{${bgKey}}}`);
+        // Apply results
+        bgResults.forEach(result => {
+            bgTemplates[`{{${result.bgKey}}}`] = result.html;
+            $(result.element).replaceWith(`{{${result.bgKey}}}`);
+        });
+
+        console.log(`✅ Completed processing ${bgLayerDivs.length} bgLayers divs concurrently`);
     }
 
     // Save background templates
@@ -357,19 +443,22 @@ async function generateBareMinimumHtml(sectionIndex, outputDir) {
     const bgPlaceholderHtmlFile = `bg_placeholder_${sectionIndex}.html`;
     await fs.writeFile(path.join(outputDir, bgPlaceholderHtmlFile), htmlWithBgPlaceholders);
 
-    // **STEP 2: Process flex/grid divs with AI**
-    console.log('\n📊 Processing flex/grid divs with AI optimization...');
+    // **STEP 2: Process flex/grid divs with AI CONCURRENTLY**
+    console.log('\n📊 Processing flex/grid divs from innermost first (CONCURRENT MODE)...');
     let $saved = cheerio.load(htmlWithBgPlaceholders);
     const componentTemplates = {};
     let templateCounter = 2001;
     
     let processedInThisRound = true;
     let totalProcessed = 0;
+    const maxConcurrentBatch = 10; // Process up to 10 elements concurrently per batch
     
     while (processedInThisRound && totalProcessed < 50) { // Safety limit
         processedInThisRound = false;
         const flexGridDivs = [];
         
+        // Find ALL divs with flex/grid properties first
+        const allFlexGridDivs = [];
         $saved('div[id]').each((index, element) => {
             const $element = $saved(element);
             const id = $element.attr('id');
@@ -379,66 +468,100 @@ async function generateBareMinimumHtml(sectionIndex, outputDir) {
             if ($saved.html($element).includes('{{template-')) return;
             
             if (id && hasFlexOrGridProperties(element, $saved)) {
-                if (!containsOnlyWidgets(element, $saved)) {
-                    flexGridDivs.push({
-                        id: id,
-                        element: element,
-                        html: $saved.html($element),
-                        depth: getNestingDepth(element, $saved)
-                    });
-                }
+                allFlexGridDivs.push({
+                    id: id,
+                    element: element,
+                    html: $saved.html($element),
+                    depth: getNestingDepth(element, $saved)
+                });
+            }
+        });
+
+        // Filter to get only the INNERMOST flex/grid divs that have nested structure
+        allFlexGridDivs.forEach(divData => {
+            const isInnermost = isInnermostFlexGridDiv(divData.element, $saved, allFlexGridDivs);
+            const hasNestedDivs = hasOneOrMoreNestedDivs(divData.element, $saved);
+            const containsOnlyWidgetsFlag = containsOnlyWidgets(divData.element, $saved);
+            
+            // Only process if it's innermost, has nested structure, and doesn't contain only widgets
+            if (isInnermost && hasNestedDivs && !containsOnlyWidgetsFlag) {
+                flexGridDivs.push(divData);
             }
         });
 
         if (flexGridDivs.length === 0) break;
 
-        // Sort by depth (deepest first)
+        // Sort by depth (deepest first to maintain innermost-first processing)
         flexGridDivs.sort((a, b) => b.depth - a.depth);
         
-        console.log(`\n🔄 Round ${Math.floor(totalProcessed/10) + 1}: Processing ${flexGridDivs.length} flex/grid divs`);
+        const batchSize = Math.min(flexGridDivs.length, maxConcurrentBatch);
+        const currentBatch = flexGridDivs.slice(0, batchSize);
+        
+        console.log(`\n⚡ Round ${Math.floor(totalProcessed/maxConcurrentBatch) + 1}: Processing ${currentBatch.length} innermost flex/grid divs concurrently`);
 
-        // Process flex/grid divs with AI
-        for (let i = 0; i < flexGridDivs.length && i < 10; i++) { // Limit per round
-            const divData = flexGridDivs[i];
-            const templateKey = `template-${String(templateCounter).padStart(4, '0')}`;
-            
-            console.log(`\n🔧 Processing flex/grid ${i + 1}/${Math.min(flexGridDivs.length, 10)}: ${divData.id}`);
+        // Process flex/grid divs CONCURRENTLY
+        const flexGridPromises = currentBatch.map(async (divData, index) => {
+            const templateKey = `template-${String(templateCounter + index).padStart(4, '0')}`;
             
             // Check size
             const sizeInBytes = Buffer.byteLength(divData.html, 'utf8');
             if (sizeInBytes > 10000) {
                 console.warn(`📏 Div ${divData.id} too large (${sizeInBytes} bytes), saving intact`);
-                componentTemplates[`{{${templateKey}}}`] = divData.html;
-                $saved(divData.element).replaceWith(`{{${templateKey}}}`);
-                processedInThisRound = true;
-                totalProcessed++;
-                templateCounter++;
-                continue;
+                return {
+                    templateKey,
+                    html: divData.html,
+                    element: divData.element,
+                    optimized: false,
+                    id: divData.id
+                };
             }
             
             // Use AI optimization for flex/grid
+            console.log(`🤖 Starting AI optimization for innermost ${divData.id}...`);
             const result = await optimizeWithAI(divData.html, 'flexGrid', divData.id);
             
             if (result.success && result.html && result.html !== divData.html) {
                 console.log(`✅ AI optimized ${divData.id}: ${result.originalLength} → ${result.optimizedLength} bytes`);
-                componentTemplates[`{{${templateKey}}}`] = result.html;
+                return {
+                    templateKey,
+                    html: result.html,
+                    element: divData.element,
+                    optimized: true,
+                    id: divData.id
+                };
             } else {
                 console.log(`🛡️ Using original ${divData.id}: ${result.error || 'No optimization'}`);
-                componentTemplates[`{{${templateKey}}}`] = divData.html;
+                return {
+                    templateKey,
+                    html: divData.html,
+                    element: divData.element,
+                    optimized: false,
+                    id: divData.id
+                };
             }
-            
-            $saved(divData.element).replaceWith(`{{${templateKey}}}`);
-            processedInThisRound = true;
-            totalProcessed++;
-            templateCounter++;
-        }
+        });
+
+        // Wait for all flex/grid elements in this batch to complete
+        const flexGridResults = await Promise.all(flexGridPromises);
+        
+        // Apply results
+        flexGridResults.forEach(result => {
+            componentTemplates[`{{${result.templateKey}}}`] = result.html;
+            $saved(result.element).replaceWith(`{{${result.templateKey}}}`);
+        });
+
+        processedInThisRound = true;
+        totalProcessed += currentBatch.length;
+        templateCounter += currentBatch.length;
+        
+        console.log(`✅ Completed batch of ${currentBatch.length} innermost flex/grid divs concurrently`);
         
         if (processedInThisRound) {
             $saved = cheerio.load($saved.html());
         }
     }
 
-    console.log(`\n🎯 Completed processing ${totalProcessed} flex/grid divs total`);
+    console.log(`\n🎯 Completed processing ${totalProcessed} innermost flex/grid divs total (CONCURRENT MODE)`);
 
     // Save final output
     const finalBareHtml = $saved.html();
@@ -448,10 +571,10 @@ async function generateBareMinimumHtml(sectionIndex, outputDir) {
     const componentsJsonFile = `bareminimum_${sectionIndex}.json`;
     await fs.writeFile(path.join(outputDir, componentsJsonFile), JSON.stringify(componentTemplates, null, 2));
 
-    console.log('\n🎉 Bare minimum HTML generation complete!');
+    console.log('\n🎉 Bare minimum HTML generation complete (CONCURRENT MODE)!');
     console.log('📊 Summary:');
-    console.log(`   🎨 Background layers: ${bgLayerDivs.length} processed`);
-    console.log(`   📊 Flex/Grid divs: ${totalProcessed} processed`);
+    console.log(`   🎨 Background layers: ${bgLayerDivs.length} processed concurrently`);
+    console.log(`   📊 Flex/Grid divs: ${totalProcessed} processed in concurrent batches`);
     console.log(`   📄 Files generated: ${bareMinimumFile}, ${bgJsonFile}, ${componentsJsonFile}`);
     console.log('='.repeat(60));
 
@@ -465,8 +588,29 @@ async function generateBareMinimumHtml(sectionIndex, outputDir) {
         componentTemplates
     };
 }
-
-// Helper functions for flex/grid processing
+function isInnermostFlexGridDiv(element, $, allFlexGridDivs) {
+    const $element = $(element);
+    
+    // Check if any child divs also have flex/grid properties
+    const hasFlexGridChildren = allFlexGridDivs.some(otherDiv => {
+        const $other = $(otherDiv.element);
+        // Check if otherDiv is a descendant of current element
+        return $element.find(`#${otherDiv.id}`).length > 0;
+    });
+    
+    return !hasFlexGridChildren;
+}
+// Check if the div has one or more nested divs (not just text/widgets)
+function hasOneOrMoreNestedDivs(element, $) {
+    const $element = $(element);
+    const nestedDivs = $element.find('div');
+    
+    // Must have at least one nested div
+    if (nestedDivs.length === 0) return false;
+    
+    // Accept any div that has at least one child div (including single-child structures)
+    return nestedDivs.length >= 1;
+}
 function hasFlexOrGridProperties(element, $) {
     const $element = $(element);
     const style = $element.attr('style') || '';
@@ -482,7 +626,6 @@ function hasFlexOrGridProperties(element, $) {
     
     return hasFlexInline || hasGridInline || hasFlexClass || hasGridClass;
 }
-
 function containsOnlyWidgets(element, $) {
     const $element = $(element);
     const childDivs = $element.find('div[id]');
@@ -503,7 +646,6 @@ function containsOnlyWidgets(element, $) {
     
     return allChildrenAreWidgets;
 }
-
 function getNestingDepth(element, $context) {
     let depth = 0;
     let current = $context(element);
@@ -546,8 +688,8 @@ if (!isMainThread) {
                     { role: "system", content: systemPrompt },
                     { role: "user", content: html }
                 ],
-                temperature: 0.1,
-                max_tokens: 8192
+                temperature: 0.3,
+                max_tokens: 12288,
             });
 
             let optimizedHtml = response.choices[0].message.content.trim();
@@ -717,55 +859,82 @@ ${bodyContent}
         }
 
         // Step 7: Generate bare minimum HTML
-        console.log('\n🛠️ STEP 7: Generating bare minimum HTML for components...');
-        const bareMinimumResults = [];
+               console.log('\n🛠️ STEP 7: Generating bare minimum HTML for ALL components CONCURRENTLY...');
         
-        for (const component of result.extractedComponents) {
-            if (component.found) {
+        const bareMinimumPromises = result.extractedComponents
+            .filter(component => component.found)
+            .map(async (component) => {
                 const componentPath = path.join(__dirname, component.componentFile);
                 const componentHtml = await fs.readFile(componentPath, 'utf8');
                 
-                const bareMinimumResult = await generateBareMinimumHtml(
-                    component.placeholderId.replace('wigoh-id-', ''), // Extract just the number
-                    path.join(__dirname, 'components')
-                );
+                console.log(`⚡ Starting bare minimum generation for component ${component.placeholderId}...`);
                 
-                bareMinimumResults.push({
-                    componentId: component.placeholderId,
-                    bareMinimumFile: bareMinimumResult.bareMinimumFile,
-                    bgJsonFile: bareMinimumResult.bgJsonFile,
-                    componentsJsonFile: bareMinimumResult.componentsJsonFile
-                });
-            }
+                try {
+                    const bareMinimumResult = await generateBareMinimumHtml(
+                        component.placeholderId.replace('wigoh-id-', ''), // Extract just the number
+                        path.join(__dirname, 'components')
+                    );
+                    
+                    console.log(`✅ Completed bare minimum generation for component ${component.placeholderId}`);
+                    
+                    return {
+                        componentId: component.placeholderId,
+                        bareMinimumFile: bareMinimumResult.bareMinimumFile,
+                        bgJsonFile: bareMinimumResult.bgJsonFile,
+                        componentsJsonFile: bareMinimumResult.componentsJsonFile,
+                        success: true
+                    };
+                } catch (error) {
+                    console.error(`❌ Failed bare minimum generation for component ${component.placeholderId}:`, error.message);
+                    return {
+                        componentId: component.placeholderId,
+                        success: false,
+                        error: error.message
+                    };
+                }
+            });
+
+        // Wait for ALL bare minimum generations to complete
+        const bareMinimumResults = await Promise.all(bareMinimumPromises);
+        const successfulBareMinimum = bareMinimumResults.filter(result => result.success);
+        const failedBareMinimum = bareMinimumResults.filter(result => !result.success);
+        
+        console.log(`\n✅ Bare minimum generation completed:`);
+        console.log(`   - Successful: ${successfulBareMinimum.length}`);
+        console.log(`   - Failed: ${failedBareMinimum.length}`);
+        
+        if (failedBareMinimum.length > 0) {
+            console.log(`⚠️ Failed components:`, failedBareMinimum.map(f => f.componentId));
         }
         
-        // 🚀 NEW RECURSIVE STEP 8: Assemble final website
+        // Step 8: Assemble final website
         console.log('\n🛠️ STEP 8: Assembling Final Website...');
         const finalAssemblyResult = await assembleFinalWebsite(__dirname);
         
-        console.log('\n🎉 MIGRATION PROCESS COMPLETED SUCCESSFULLY!');
+        console.log('\n🎉 MIGRATION PROCESS COMPLETED SUCCESSFULLY WITH CONCURRENT PROCESSING!');
         console.log('📊 Final Statistics:');
         console.log(`   - Components extracted: ${result.extractedComponents.length}`);
         console.log(`   - Target IDs found: ${result.extractedComponents.filter(c => c.found).length}`);
         console.log(`   - Widgets extracted: ${widgetExtractions.reduce((sum, w) => sum + w.widgetCount, 0)}`);
-        console.log(`   - Bare minimum HTML files generated: ${bareMinimumResults.length}`);
+        console.log(`   - Bare minimum HTML files generated: ${successfulBareMinimum.length}`);
+        console.log(`   - Failed bare minimum generations: ${failedBareMinimum.length}`);
         console.log(`   - Final components assembled: ${finalAssemblyResult.componentsProcessed}/${finalAssemblyResult.totalPlaceholders}`);
         console.log(`   - Final website created: ${finalAssemblyResult.finalWebsitePath}`);
-        console.log(`   - Original HTML with placeholders created`);
-        console.log(`   - HTML Source URL: ${htmlUrl}`);
-        console.log(`   - Styles Source URL: ${stylesUrl || 'None'}\n`);
+        console.log(`   - Processing mode: CONCURRENT ⚡`);
         
         res.json({
             success: true,
-            message: 'Migration completed successfully with final website assembly',
+            message: 'Migration completed successfully with concurrent AI processing',
             stats: {
                 componentsExtracted: result.extractedComponents.length,
                 targetIdsFound: result.extractedComponents.filter(c => c.found).length,
                 widgetsExtracted: widgetExtractions.reduce((sum, w) => sum + w.widgetCount, 0),
-                bareMinimumFilesGenerated: bareMinimumResults.length,
+                bareMinimumFilesGenerated: successfulBareMinimum.length,
+                failedBareMinimumFiles: failedBareMinimum.length,
                 finalComponentsAssembled: finalAssemblyResult.componentsProcessed,
                 totalPlaceholders: finalAssemblyResult.totalPlaceholders,
                 finalWebsiteSize: finalAssemblyResult.finalHtml.length,
+                processingMode: 'CONCURRENT',
                 htmlUrl: htmlUrl,
                 stylesUrl: stylesUrl || null,
                 extractedAt: new Date().toISOString(),
@@ -775,7 +944,8 @@ ${bodyContent}
             },
             components: result.extractedComponents,
             widgetExtractions: widgetExtractions,
-            bareMinimumResults: bareMinimumResults,
+            bareMinimumResults: successfulBareMinimum,
+            failedBareMinimumResults: failedBareMinimum,
             finalAssembly: finalAssemblyResult,
             originalHtmlFile: result.originalHtmlFile,
             styledHtmlFile: processedHtml.layoutInlineFile
@@ -790,31 +960,22 @@ ${bodyContent}
         console.error(`   - Styles URL: ${stylesUrl}`);
         console.error(`   - Timestamp: ${new Date().toISOString()}\n`);
         
-        let errorResponse = {
+        res.status(500).json({
             error: 'Migration failed',
             message: error.message,
             type: error.name,
             timestamp: new Date().toISOString(),
             urls: { htmlUrl, stylesUrl }
-        };
-        
-        if (error.message.includes('fetch failed') || error.message.includes('ENOTFOUND')) {
-            errorResponse.message = 'Cannot access one or both URLs. Please check that they are accessible and correct.';
-            errorResponse.suggestion = 'Verify both URLs are correct and accessible from the server';
-        } else if (error.message.includes('timeout')) {
-            errorResponse.message = 'Request timed out. The URLs took too long to respond.';
-            errorResponse.suggestion = 'Try again or check if the URLs are responsive';
-        }
-        
-        res.status(500).json(errorResponse);
+        });
     }
 });
-// - EnhancedHtmlStyleProcessor class
+// Enhanced EnhancedHtmlStyleProcessor class with index-based matching
 class EnhancedHtmlStyleProcessor {
     constructor() {
         this.unmatchedElements = [];
         this.elementIndex = 0;
         this.processedElements = new Set();
+        this.excludedTags = ['html', 'head', 'meta', 'title', 'script', 'noscript', 'style', 'link'];
     }
 
     camelToKebab(str) {
@@ -842,320 +1003,289 @@ class EnhancedHtmlStyleProcessor {
         return String(value).trim();
     }
 
-    extractAttributesFromHtml(htmlString) {
-        if (!htmlString) return {};
-        try {
-            const $ = cheerio.load(htmlString);
-            const element = $.root().children().first();
-            const attributes = {};
-            if (element.length > 0) {
-                const attrs = element.get(0).attribs || {};
-                if (attrs.id) attributes.id = attrs.id;
-                if (attrs.class) attributes.className = attrs.class;
-                if (attrs['data-mesh-id']) attributes.dataMeshId = attrs['data-mesh-id'];
-                if (attrs['data-testid']) attributes.dataTestId = attrs['data-testid'];
-                if (attrs['data-test-id']) attributes.dataTestId = attrs['data-test-id'];
+    // Flatten the nested JSON structure to get all elements with styles
+    flattenElements(data, flatArray = []) {
+        if (Array.isArray(data)) {
+            for (let i = 0; i < data.length; i++) {
+                this.flattenElements(data[i], flatArray);
             }
-            if (Object.keys(attributes).length === 0) {
-                const meshIdMatch = htmlString.match(/data-mesh-id=["']([^"']+)["']/);
-                if (meshIdMatch) attributes.dataMeshId = meshIdMatch[1];
-                const testIdMatch = htmlString.match(/data-testid=["']([^"']+)["']/);
-                if (testIdMatch) attributes.dataTestId = testIdMatch[1];
-                const idMatch = htmlString.match(/\sid=["']([^"']+)["']/);
-                if (idMatch) attributes.id = idMatch[1];
-                const classMatch = htmlString.match(/class=["']([^"']*)["']/);
-                if (classMatch && classMatch[1].trim()) attributes.className = classMatch[1];
-            }
-            return attributes;
-        } catch (error) {
-            return {};
-        }
-    }
-
-    enrichElementData(element, parentPath = '') {
-        const enriched = {
-            id: this.safeStringTrim(element.id || element.elementId || element.compId),
-            className: this.safeStringTrim(element.className || element.class || element.cssClass),
-            dataTestId: this.safeStringTrim(element.dataTestId || element['data-test-id'] || element.testId || element['data-testid']),
-            dataMeshId: this.safeStringTrim(element.dataMeshId || element['data-mesh-id'] || element.meshId),
-            styles: element.styles || element.style || element.css || {},
-            html: this.safeStringTrim(element.html || element.innerHTML || element.outerHTML),
-            path: element.path || parentPath,
-            parentId: element.parentId || '',
-            tagName: element.tagName || element.tag || '',
-            textContent: this.safeStringTrim(element.textContent || element.text || element.innerText || ''),
-            originalIndex: this.elementIndex++
-        };
-
-        if (enriched.html) {
-            const htmlAttrs = this.extractAttributesFromHtml(enriched.html);
-            if (!enriched.id && htmlAttrs.id) enriched.id = htmlAttrs.id;
-            if (!enriched.className && htmlAttrs.className) enriched.className = htmlAttrs.className;
-            if (!enriched.dataMeshId && htmlAttrs.dataMeshId) enriched.dataMeshId = htmlAttrs.dataMeshId;
-            if (!enriched.dataTestId && htmlAttrs.dataTestId) enriched.dataTestId = htmlAttrs.dataTestId;
-        }
-
-        return enriched;
-    }
-
-    createElementSignature(element) {
-        const parts = [];
-        if (element.id) parts.push(`id:${element.id}`);
-        if (element.dataMeshId) parts.push(`mesh:${element.dataMeshId}`);
-        if (element.dataTestId) parts.push(`test:${element.dataTestId}`);
-        if (element.className) parts.push(`class:${element.className}`);
-        if (element.textContent) parts.push(`text:${element.textContent.substring(0,20)}`);
-        if (element.tagName) parts.push(`tag:${element.tagName}`);
-        parts.push(`idx:${element.originalIndex}`);
-        return parts.join('|');
-    }
-
-    escapeCSSValue(value) {
-        if (!value || typeof value !== 'string') return '';
-        return value
-            .replace(/\\/g, '\\\\')
-            .replace(/"/g, '\\"')
-            .replace(/'/g, "\\'")
-            .replace(/\n/g, '\\n')
-            .replace(/\r/g, '\\r')
-            .replace(/\t/g, '\\t');
-    }
-
-    isValidCSSSelector(selector) {
-        if (!selector || typeof selector !== 'string' || selector.trim() === '') return false;
-        if (selector.includes('[]') || selector.includes('""') || selector.includes("''")) return false;
-        const openBrackets = (selector.match(/\[/g) || []).length;
-        const closeBrackets = (selector.match(/\]/g) || []).length;
-        if (openBrackets !== closeBrackets) return false;
-        try {
-            const testHtml = '<div></div>';
-            const testCheerio = require('cheerio').load(testHtml);
-            testCheerio(selector);
-            return true;
-        } catch (error) {
-            return false;
-        }
-    }
-
-    safeQuerySelector($, selector, description = '') {
-        if (!this.isValidCSSSelector(selector)) return $();
-        try {
-            return $(selector);
-        } catch (error) {
-            return $();
-        }
-    }
-
-    findPreciseMatch($, element) {
-        let candidates = [];
-        
-        if (element.id && element.id.trim()) {
-            const escapedId = this.escapeCSSValue(element.id);
-            const idSelector = `#${escapedId}`;
-            const idMatches = this.safeQuerySelector($, idSelector, 'for ID');
-            if (idMatches.length === 1) {
-                return { element: idMatches.first(), confidence: 100, method: 'unique-id' };
-            } else if (idMatches.length > 1) {
-                candidates = candidates.concat(
-                    idMatches.toArray().map((el, idx) => ({
-                        element: $(el),
-                        confidence: 90 - idx,
-                        method: 'id-with-disambiguation'
-                    }))
-                );
-            }
-        }
-        
-        if (element.dataMeshId && element.dataMeshId.trim()) {
-            const escapedMeshId = this.escapeCSSValue(element.dataMeshId);
-            const meshSelector = `[data-mesh-id="${escapedMeshId}"]`;
-            const meshMatches = this.safeQuerySelector($, meshSelector, 'for data-mesh-id');
-            if (meshMatches.length === 1) {
-                return { element: meshMatches.first(), confidence: 95, method: 'unique-mesh-id' };
-            } else if (meshMatches.length > 1) {
-                candidates = candidates.concat(
-                    meshMatches.toArray().map((el, idx) => ({
-                        element: $(el),
-                        confidence: 85 - idx,
-                        method: 'mesh-id-with-disambiguation'
-                    }))
-                );
-            }
-        }
-        
-        if (element.dataTestId && element.dataTestId.trim()) {
-            const escapedTestId = this.escapeCSSValue(element.dataTestId);
-            const testIdSelectors = [
-                `[data-testid="${escapedTestId}"]`,
-                `[data-test-id="${escapedTestId}"]`
-            ];
-            for (const selector of testIdSelectors) {
-                const testMatches = this.safeQuerySelector($, selector, 'for data-testid');
-                if (testMatches.length === 1) {
-                    return { element: testMatches.first(), confidence: 80, method: 'unique-test-id' };
-                } else if (testMatches.length > 1) {
-                    candidates = candidates.concat(
-                        testMatches.toArray().map((el, idx) => ({
-                            element: $(el),
-                            confidence: 70 - idx,
-                            method: 'test-id-with-disambiguation'
-                        }))
-                    );
+        } else if (data && typeof data === 'object') {
+            if (data.styles && typeof data.styles === 'object') {
+                // SKIP SCRIPT TAGS IN JSON
+                if (data.tag && data.tag.toLowerCase() === 'script') {
+                    console.log(`⏭️  SKIPPING JSON: Script tag found in JSON - ignoring`);
+                    return flatArray;
                 }
-            }
-        }
-        
-        if (element.className && element.className.trim()) {
-            const classes = element.className.split(' ').filter(c => c.trim());
-            for (const className of classes) {
-                if (!className.match(/^[a-zA-Z_-][a-zA-Z0-9_-]*$/)) continue;
-                const classSelector = `.${className}`;
-                const classMatches = this.safeQuerySelector($, classSelector, `for class ${className}`);
-                if (classMatches.length > 0) {
-                    classMatches.each((idx, el) => {
-                        const $el = $(el);
-                        let contextScore = 0;
-                        if (element.textContent && $el.text().trim() === element.textContent) contextScore += 30;
-                        if (element.tagName && $el.get(0).tagName.toLowerCase() === element.tagName.toLowerCase()) contextScore += 20;
-                        if (element.parentId && element.parentId.trim()) {
-                            const escapedParentId = this.escapeCSSValue(element.parentId);
-                            const parentSelector = `#${escapedParentId}`;
-                            if (this.isValidCSSSelector(parentSelector)) {
-                                const parent = $el.closest(parentSelector);
-                                if (parent.length > 0) contextScore += 25;
-                            }
-                        }
-                        candidates.push({
-                            element: $el,
-                            confidence: 40 + contextScore - idx,
-                            method: `class-context-${className}`
-                        });
-                      });
+                
+                // SKIP if HTML contains script tag
+                if (data.html && data.html.toLowerCase().includes('<script')) {
+                    console.log(`⏭️  SKIPPING JSON: Script tag found in HTML string - ignoring`);
+                    return flatArray;
                 }
-            }
-        }
-        
-        candidates.sort((a, b) => b.confidence - a.confidence);
-        if (candidates.length > 0) return candidates[0];
-        return null;
-    }
-
-    applyStylesToElement($, element, styleString) {
-        const elementSignature = this.createElementSignature(element);
-        if (this.processedElements.has(elementSignature)) {
-            return { success: false, reason: 'already-processed' };
-        }
-        const match = this.findPreciseMatch($, element);
-        if (!match) return { success: false, reason: 'no-match-found' };
-        const $targetElement = match.element;
-        if ($targetElement.get(0).tagName && $targetElement.get(0).tagName.toLowerCase() === 'html') {
-            return { success: false, reason: 'html-element-skipped' };
-        }
-        const existingStyle = $targetElement.attr('style') || '';
-        const existingStyles = existingStyle ? existingStyle.split(';').map(s => s.trim()).filter(s => s) : [];
-        const newStyles = styleString.split(';').map(s => s.trim()).filter(s => s);
-        const styleMap = new Map();
-        existingStyles.forEach(style => {
-            const [prop, value] = style.split(':').map(s => s.trim());
-            if (prop && value) styleMap.set(prop, value);
-        });
-        newStyles.forEach(style => {
-            const [prop, value] = style.split(':').map(s => s.trim());
-            if (prop && value) styleMap.set(prop, value);
-        });
-        const finalStyle = Array.from(styleMap.entries())
-            .map(([prop, value]) => `${prop}: ${value}`)
-            .join('; ');
-        $targetElement.attr('style', finalStyle);
-        this.processedElements.add(elementSignature);
-        return { success: true, method: match.method, confidence: match.confidence };
-    }
-
-    extractElements(layoutData) {
-        let elements = [];
-        const findElements = (obj, path = '', parentId = '') => {
-            if (obj === null || typeof obj !== 'object') return;
-            if (Array.isArray(obj)) {
-                obj.forEach((item, index) => {
-                    findElements(item, `${path}[${index}]`, parentId);
+                
+                flatArray.push({
+                    tag: data.tag,
+                    id: data.id,
+                    className: data.className,
+                    html: data.html,
+                    styles: data.styles,
+                    jsonIndex: flatArray.length
                 });
-                return;
             }
-            const hasStyleInfo = obj.styles || obj.className || obj.id || obj.dataTestId || obj['data-test-id'];
-            const hasLayoutInfo = obj.type || obj.tag || obj.tagName || obj.element || obj.component || obj.html;
-            if (hasStyleInfo || hasLayoutInfo) {
-                const element = this.enrichElementData({
-                    ...obj,
-                    path: path,
-                    parentId: parentId
-                });
-                if (element.styles && Object.keys(element.styles).length > 0 &&
-                    (element.id || element.className || element.dataTestId || element.dataMeshId || element.html)) {
-                    elements.push(element);
+            
+            if (data.children && Array.isArray(data.children)) {
+                for (let i = 0; i < data.children.length; i++) {
+                    this.flattenElements(data.children[i], flatArray);
                 }
             }
-            const currentId = obj.id || obj.elementId || obj.compId || parentId;
-            for (const [key, value] of Object.entries(obj)) {
-                if (typeof value === 'object' && value !== null) {
-                    findElements(value, `${path}.${key}`, currentId);
-                }
-            }
-        };
-        findElements(layoutData);
-        return elements;
+        }
+        return flatArray;
+    }
+
+    // Generate HTML string from DOM element (for logging purposes)
+    getElementHtmlString(element, $) {
+        const $el = $(element);
+        const tag = element.tagName.toLowerCase();
+        
+        // ADDITIONAL SCRIPT CHECK: Skip if element is script tag
+        if (tag === 'script') {
+            console.log(`⏭️  SKIPPING HTML ELEMENT: Script tag detected during processing`);
+            return null;
+        }
+        
+        const id = $el.attr('id') || '';
+        const className = $el.attr('class') || '';
+        
+        // Create HTML string exactly like in JSON (with closing tag)
+        let htmlStr = `<${tag}`;
+        if (id) htmlStr += ` id="${id}"`;
+        if (className) htmlStr += ` class="${className}"`;
+        htmlStr += `></${tag}>`;
+        
+        return htmlStr;
     }
 
     async processHtml(rawHtml, layoutJson, outputDir, sectionIndex) {
+        console.log('🚀 Starting INDEX-BASED HTML Style Matching (Body Elements Only)...');
+        console.log('🎯 Method: HTML[index] ↔ JSON[index] - Direct index correspondence');
+        console.log('📍 Rule: HTML element at index N gets styles from JSON entry at index N');
+        console.log('🔄 Rule: No string matching required - pure index-based assignment');
+        console.log('⏭️  Rule: Ignores html, head, meta, title, script tags - processes body elements only');
+        console.log('🛡️  Security: Script tags are completely skipped for safety');
+
         const $ = cheerio.load(rawHtml);
-        const elements = this.extractElements(layoutJson);
-        if (elements.length === 0) {
-            return {
-                styledHtml: this.formatCleanHtml(rawHtml),
-                layoutInlineFile: null
-            };
+        
+        // Get flattened array of all elements with styles from JSON
+        const jsonStylesArray = this.flattenElements(layoutJson);
+        
+        // ENHANCED: Exclude script tags and other non-styleable elements
+        const allHtmlElements = $('*').toArray().filter(element => {
+            const tagName = element.tagName.toLowerCase();
+            
+            // Skip excluded tags (including script tags)
+            if (this.excludedTags.includes(tagName)) {
+                console.log(`⏭️  SKIPPING HTML TAG: <${tagName}> - excluded from processing`);
+                return false;
+            }
+            
+            // Only include elements that are inside body or are body itself
+            const $element = $(element);
+            const isInBody = $element.closest('body').length > 0 || tagName === 'body';
+            
+            if (!isInBody) {
+                console.log(`⏭️  SKIPPING: <${tagName}> - not inside body`);
+                return false;
+            }
+            
+            return true;
+        });
+
+        console.log(`📄 Found ${allHtmlElements.length} HTML elements in body (after filtering)`);
+        console.log(`📋 Found ${jsonStylesArray.length} style entries in JSON`);
+        console.log(`⏭️  Excluded tags: ${this.excludedTags.join(', ')}`);
+        console.log('─'.repeat(70));
+
+        let totalMatches = 0;
+        let skippedScriptElements = 0;
+        let indexMismatches = 0;
+
+        // MAIN LOOP: Process each HTML element using INDEX-BASED MATCHING
+        for (let htmlIndex = 0; htmlIndex < allHtmlElements.length; htmlIndex++) {
+            const htmlElement = allHtmlElements[htmlIndex];
+            const $htmlElement = $(htmlElement);
+            
+            // ADDITIONAL SCRIPT CHECK: Skip script elements during processing
+            if (htmlElement.tagName.toLowerCase() === 'script') {
+                console.log(`⏭️  SKIPPING SCRIPT ELEMENT during main processing loop`);
+                skippedScriptElements++;
+                continue;
+            }
+            
+            // Generate HTML string for this DOM element (for logging)
+            const htmlElementString = this.getElementHtmlString(htmlElement, $);
+            
+            // Skip if getElementHtmlString returned null (script tag)
+            if (htmlElementString === null) {
+                skippedScriptElements++;
+                continue;
+            }
+            
+            console.log(`\n🔄 PROCESSING HTML[${htmlIndex}]:`);
+            console.log(`   Element: ${htmlElementString}`);
+            
+            // INDEX-BASED MATCHING: Try to match with JSON entry at the same index
+            if (htmlIndex < jsonStylesArray.length) {
+                const jsonEntry = jsonStylesArray[htmlIndex];
+                
+                // ADDITIONAL SCRIPT CHECK: Skip JSON entries for script tags
+                if (jsonEntry.tag && jsonEntry.tag.toLowerCase() === 'script') {
+                    console.log(`   ⏭️  SKIPPING JSON[${htmlIndex}]: Script tag detected`);
+                    indexMismatches++;
+                    continue;
+                }
+                
+                // SKIP if JSON HTML contains script tags
+                if (jsonEntry.html && jsonEntry.html.toLowerCase().includes('<script')) {
+                    console.log(`   ⏭️  SKIPPING JSON[${htmlIndex}]: Contains script tag in HTML`);
+                    indexMismatches++;
+                    continue;
+                }
+                
+                console.log(`\n🎯 INDEX MATCHING: HTML[${htmlIndex}] ↔ JSON[${htmlIndex}]`);
+                console.log(`   ✅ HTML Element: ${htmlElementString}`);
+                console.log(`   ✅ JSON Entry: ${jsonEntry.html || 'No HTML string in JSON'}`);
+                console.log(`   📍 Applying styles based on index position`);
+                
+                // Apply styles from this JSON entry
+                let inlineStyleString = '';
+                const styles = jsonEntry.styles;
+                let validStyleCount = 0;
+                
+                console.log(`   📝 Processing ${Object.keys(styles).length} style properties:`);
+                
+                // Loop through all style properties
+                for (const property in styles) {
+                    if (styles.hasOwnProperty(property)) {
+                        const value = styles[property];
+                        
+                        // Only add valid CSS values
+                        if (value !== null && value !== undefined && value !== '' && 
+                            (typeof value === 'string' || typeof value === 'number')) {
+                            
+                            inlineStyleString += `${property}: ${value}; `;
+                            validStyleCount++;
+                            console.log(`      ✅ ${property}: ${value}`);
+                        } else {
+                            console.log(`      ❌ SKIPPED ${property}: ${value} (invalid)`);
+                        }
+                    }
+                }
+                
+                // Apply styles to the HTML element
+                if (inlineStyleString.trim() !== '') {
+                    const existingStyle = $htmlElement.attr('style') || '';
+                    const finalStyle = existingStyle + (existingStyle ? '; ' : '') + inlineStyleString.trim();
+                    
+                    $htmlElement.attr('style', finalStyle);
+                    
+                    console.log(`   ✅ APPLIED ${validStyleCount} styles to HTML element`);
+                    console.log(`   📄 Final style: ${finalStyle.substring(0, 100)}${finalStyle.length > 100 ? '...' : ''}`);
+                } else {
+                    console.log(`   ❌ NO VALID STYLES TO APPLY`);
+                }
+                
+                totalMatches++;
+                console.log(`   🔒 Index match successful (total matches: ${totalMatches})`);
+                
+            } else {
+                // No corresponding JSON entry at this index
+                console.log(`\n❌ NO JSON ENTRY: No JSON entry found at index ${htmlIndex}`);
+                console.log(`   HTML Element: ${htmlElementString}`);
+                console.log(`   JSON Array Length: ${jsonStylesArray.length}`);
+                console.log(`   HTML elements exceed JSON entries`);
+                indexMismatches++;
+            }
+            
+            console.log(`${'─'.repeat(50)}`);
+            
+            // Show progress every 50 elements
+            if ((htmlIndex + 1) % 50 === 0) {
+                console.log(`📊 Progress: ${htmlIndex + 1}/${allHtmlElements.length} (${totalMatches} index matches applied)`);
+            }
         }
-        let successCount = 0;
-        let failureCount = 0;
-        elements.sort((a, b) => {
-            let scoreA = 0, scoreB = 0;
-            if (a.id) scoreA += 100;
-            if (b.id) scoreB += 100;
-            if (a.dataMeshId) scoreA += 50;
-            if (b.dataMeshId) scoreB += 50;
-            if (a.dataTestId) scoreA += 30;
-            if (b.dataTestId) scoreB += 30;
-            return scoreA === scoreB ? a.originalIndex - b.originalIndex : scoreB - scoreA;
-        });
-        elements.forEach((element) => {
-            if (!element.styles || Object.keys(element.styles).length === 0) return;
-            const styleString = this.styleObjectToString(element.styles);
-            const result = this.applyStylesToElement($, element, styleString);
-            result.success ? successCount++ : failureCount++;
-        });
+
         const styledHtml = this.formatCleanHtml($.html());
         const layoutInlineFile = `layout_inlineStyles_${sectionIndex}.html`;
-        await fs.writeFile(path.join(outputDir, layoutInlineFile), styledHtml);
+        
+        if (outputDir) {
+            await fs.writeFile(path.join(outputDir, layoutInlineFile), styledHtml);
+        }
+
+        console.log('\n' + '═'.repeat(70));
+        console.log('📊 FINAL RESULTS (INDEX-BASED MATCHING):');
+        console.log(`✅ Index matches applied: ${totalMatches}`);
+        console.log(`📊 HTML elements processed: ${allHtmlElements.length} (body elements only)`);
+        console.log(`⏭️  Script elements skipped: ${skippedScriptElements}`);
+        console.log(`❌ Index mismatches/skips: ${indexMismatches}`);
+        console.log(`📊 JSON entries available: ${jsonStylesArray.length}`);
+        console.log(`📈 Application rate: ${((totalMatches / allHtmlElements.length) * 100).toFixed(1)}%`);
+        
+        // Analysis
+        if (totalMatches === 0) {
+            console.log('\n🚨 WARNING: No styles applied!');
+            console.log('   • Check if JSON file contains valid style entries');
+            console.log('   • Verify both HTML and JSON have matching element counts');
+        } else if (allHtmlElements.length > jsonStylesArray.length) {
+            console.log(`\n⚠️  More HTML elements (${allHtmlElements.length}) than JSON entries (${jsonStylesArray.length})`);
+            console.log(`   • ${allHtmlElements.length - jsonStylesArray.length} HTML elements have no corresponding JSON styles`);
+            console.log('   • Consider generating JSON with complete element coverage');
+        } else if (jsonStylesArray.length > allHtmlElements.length) {
+            console.log(`\n⚠️  More JSON entries (${jsonStylesArray.length}) than HTML elements (${allHtmlElements.length})`);
+            console.log(`   • ${jsonStylesArray.length - allHtmlElements.length} JSON entries were unused`);
+            console.log('   • This is normal if JSON contains styles for elements not in current HTML');
+        } else {
+            console.log(`\n🎉 Perfect match: ${allHtmlElements.length} HTML elements = ${jsonStylesArray.length} JSON entries!`);
+        }
+        
+        if (skippedScriptElements > 0) {
+            console.log(`\n🛡️  Security: Skipped ${skippedScriptElements} script elements to prevent code injection`);
+        }
+
         return {
             styledHtml,
-            layoutInlineFile
+            layoutInlineFile,
+            stats: {
+                totalMatches,
+                totalHtmlElements: allHtmlElements.length,
+                totalJsonEntries: jsonStylesArray.length,
+                indexMismatches,
+                skippedScriptElements,
+                applicationRate: ((totalMatches / allHtmlElements.length) * 100).toFixed(1)
+            }
         };
     }
 
     formatCleanHtml(html) {
-        const $ = cheerio.load(html);
-        $('style').remove();
-        let cleanHtml = $.html();
-        if (!cleanHtml.includes('<!DOCTYPE html>')) {
-            cleanHtml = '<!DOCTYPE html>\n' + cleanHtml;
-        }
-        return cleanHtml
-            .replace(/>\s*</g, '>\n<')
-            .replace(/\n\s*\n/g, '\n')
-            .split('\n')
-            .map(line => line.trim())
-            .filter(line => line.length > 0)
-            .join('\n');
+    const $ = cheerio.load(html, {
+        // Important: Don't decode entities automatically
+        decodeEntities: false
+    });
+    
+    $('style').remove();
+    let cleanHtml = $.html();
+    
+    if (!cleanHtml.includes('<!DOCTYPE html>')) {
+        cleanHtml = '<!DOCTYPE html>\n' + cleanHtml;
     }
+    
+    return cleanHtml
+        .replace(/>\s*</g, '>\n<')
+        .replace(/\n\s*\n/g, '\n')
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0)
+        .join('\n');
+}
 }
 // - processHtmlAndExtractComponents function
 async function processHtmlAndExtractComponents(fullPageHtml, outputDir) {
@@ -1404,8 +1534,6 @@ function createNotFoundComponentHTML(originalId, placeholderId) {
 </html>`;
 }
 
-// Add after the existing generateBareMinimumHtml function and before the migration endpoint
-
 // Global variables for tracking completed sections
 const completedSections = new Map();
 let browserProcess = null;
@@ -1456,117 +1584,118 @@ class WebsiteBuilder {
         }
     }
 
-    processTemplates(content) {
-        if (!content || typeof content !== 'string') return content;
+   processTemplates(content) {
+    if (!content || typeof content !== 'string') return content;
 
-        let processedContent = content;
-        let hasReplacements = true;
-        let iterations = 0;
-        const maxIterations = 30;
+    let processedContent = content;
+    let hasReplacements = true;
+    let iterations = 0;
+    const maxIterations = 30;
 
-        while (hasReplacements && iterations < maxIterations) {
-            hasReplacements = false;
-            iterations++;
+    // Temporary storage for protected CSS values
+    const protectedCSSValues = new Map();
+    let protectCounter = 0;
+    
+    // Protect CSS values with entities before processing
+    processedContent = processedContent.replace(/style="([^"]*&quot;[^"]*)"/g, (match, styleContent) => {
+        const placeholder = `__CSS_PROTECT_${protectCounter++}__`;
+        protectedCSSValues.set(placeholder, match);
+        return placeholder;
+    });
 
-            // First pass: Replace {{template-nnnn}} patterns with data2 (bareminimum) content
-            const templateMatches = processedContent.match(/\{\{template-\d+\}\}/g);
-            if (templateMatches) {
-                for (const match of templateMatches) {
-                    if (this.data2[match]) {
-                        processedContent = processedContent.replace(match, this.data2[match]);
-                        hasReplacements = true;
-                        console.log(`    🔄 Replaced ${match} (template)`);
-                    } else {
-                        const templateId = match.replace(/[{}]/g, '');
-                        if (this.data2[templateId]) {
-                            processedContent = processedContent.replace(match, this.data2[templateId]);
-                            hasReplacements = true;
-                            console.log(`    🔄 Replaced ${match} -> ${templateId} (template)`);
-                        }
-                    }
-                }
-            }
+    while (hasReplacements && iterations < maxIterations) {
+        hasReplacements = false;
+        iterations++;
 
-            // Second pass: Replace {{widget-n}} patterns with data3 (widgets) content
-            const widgetMatches = processedContent.match(/\{\{widget-\d+\}\}/g);
-            if (widgetMatches) {
-                for (const match of widgetMatches) {
-                    if (this.data3[match]) {
-                        processedContent = processedContent.replace(match, this.data3[match]);
-                        hasReplacements = true;
-                        console.log(`    🔄 Replaced ${match} (widget)`);
-                    } else {
-                        const widgetId = match.replace(/[{}]/g, '');
-                        if (this.data3[widgetId]) {
-                            processedContent = processedContent.replace(match, this.data3[widgetId]);
-                            hasReplacements = true;
-                            console.log(`    🔄 Replaced ${match} -> ${widgetId} (widget)`);
-                        }
-                    }
-                }
-            }
-
-            // Third pass: Replace {{bg-nn}} background patterns with data1 content
-            const bgMatches = processedContent.match(/\{\{bg-\d+\}\}/g);
-            if (bgMatches) {
-                for (const match of bgMatches) {
-                    if (this.data1[match]) {
-                        processedContent = processedContent.replace(match, this.data1[match]);
-                        hasReplacements = true;
-                        console.log(`    🔄 Replaced ${match} (background)`);
-                    } else {
-                        const bgId = match.replace(/[{}]/g, '');
-                        if (this.data1[bgId]) {
-                            processedContent = processedContent.replace(match, this.data1[bgId]);
-                            hasReplacements = true;
-                            console.log(`    🔄 Replaced ${match} -> ${bgId} (background)`);
-                        }
-                    }
-                }
-            }
-
-            // Fourth pass: Handle any other placeholder patterns
-            const otherMatches = processedContent.match(/\{\{[^}]+\}\}/g);
-            if (otherMatches) {
-                for (const match of otherMatches) {
-                    let replaced = false;
-                    
-                    // Check all data sources
-                    [this.data1, this.data2, this.data3].forEach((dataSource, index) => {
-                        if (!replaced && dataSource[match]) {
-                            processedContent = processedContent.replace(match, dataSource[match]);
-                            hasReplacements = true;
-                            replaced = true;
-                            console.log(`    🔄 Replaced ${match} (data${index + 1})`);
-                        }
-                        
-                        if (!replaced) {
-                            const withoutBraces = match.replace(/[{}]/g, '');
-                            if (dataSource[withoutBraces]) {
-                                processedContent = processedContent.replace(match, dataSource[withoutBraces]);
-                                hasReplacements = true;
-                                replaced = true;
-                                console.log(`    🔄 Replaced ${match} -> ${withoutBraces} (data${index + 1})`);
-                            }
-                        }
-                    });
+        // Process templates, widgets, and backgrounds as before
+        const templateMatches = processedContent.match(/\{\{template-\d+\}\}/g);
+        if (templateMatches) {
+            for (const match of templateMatches) {
+                if (this.data2[match]) {
+                    processedContent = processedContent.replace(match, this.data2[match]);
+                    hasReplacements = true;
+                    console.log(`    📄 Replaced ${match} (template)`);
                 }
             }
         }
 
-        if (iterations >= maxIterations) {
-            console.warn(`⚠️ Maximum iterations reached for component ${this.componentId}`);
+        const widgetMatches = processedContent.match(/\{\{widget-\d+\}\}/g);
+        if (widgetMatches) {
+            for (const match of widgetMatches) {
+                if (this.data3[match]) {
+                    processedContent = processedContent.replace(match, this.data3[match]);
+                    hasReplacements = true;
+                    console.log(`    📄 Replaced ${match} (widget)`);
+                }
+            }
         }
 
-        return processedContent;
+        const bgMatches = processedContent.match(/\{\{bg-\d+\}\}/g);
+        if (bgMatches) {
+            for (const match of bgMatches) {
+                if (this.data1[match]) {
+                    processedContent = processedContent.replace(match, this.data1[match]);
+                    hasReplacements = true;
+                    console.log(`    📄 Replaced ${match} (background)`);
+                }
+            }
+        }
     }
+    
+    // Restore protected CSS values
+    for (const [placeholder, originalCSS] of protectedCSSValues) {
+        processedContent = processedContent.replace(placeholder, originalCSS);
+    }
+
+    return processedContent;
+}
 
     cleanupHTML(html) {
-        let cleaned = html;
-        cleaned = cleaned.replace(/(\w+)=([^"'\s>]+)/g, '$1="$2"');
-        cleaned = cleaned.replace(/&quot;/g, '"');
-        return cleaned;
+    let cleaned = html;
+    
+    // Fix unquoted attributes (but preserve existing quoted ones)
+    cleaned = cleaned.replace(/(\w+)=([^"'\s>]+(?:\s+[^"'\s>]+)*)/g, (match, attr, value) => {
+        // Don't quote if it's already quoted or contains quotes
+        if (value.includes('"') || value.includes("'")) {
+            return match;
+        }
+        return `${attr}="${value}"`;
+    });
+    
+    // DO NOT convert &quot; to " - this breaks CSS font-family values
+    // The browser will handle HTML entities correctly
+    
+    // Only fix malformed entities that are clearly broken
+    cleaned = cleaned.replace(/&amp;quot;/g, '&quot;'); // Fix double-encoded quotes
+    cleaned = cleaned.replace(/&amp;amp;/g, '&amp;'); // Fix double-encoded ampersands
+    
+    return cleaned;
+}
+
+cleanupHTMLWithFontFix(html) {
+    let cleaned = html;
+    
+    // First, temporarily protect font-family values
+    const fontFamilyProtected = new Map();
+    let protectCounter = 0;
+    
+    // Find and protect font-family values with &quot;
+    cleaned = cleaned.replace(/font-family:\s*&quot;([^&]+)&quot;/g, (match, fontName) => {
+        const placeholder = `__FONT_PROTECT_${protectCounter++}__`;
+        fontFamilyProtected.set(placeholder, `font-family: &quot;${fontName}&quot;`);
+        return placeholder;
+    });
+    
+    // Fix other unquoted attributes
+    cleaned = cleaned.replace(/(\w+)=([^"'\s>]+)/g, '$1="$2"');
+    
+    // Restore protected font-family values
+    for (const [placeholder, originalValue] of fontFamilyProtected) {
+        cleaned = cleaned.replace(placeholder, originalValue);
     }
+    
+    return cleaned;
+}
 
     validatePlaceholders(html) {
         const remainingPlaceholders = html.match(/\{\{[^}]+\}\}/g);
@@ -1614,7 +1743,6 @@ class WebsiteBuilder {
         };
     }
 }
-
 // Process individual component
 async function assembleFinalComponent(componentId, outputDir) {
     console.log(`\n🏗️ Assembling component: wigoh-id-${componentId}`);
@@ -1644,14 +1772,12 @@ async function assembleFinalComponent(componentId, outputDir) {
         throw error;
     }
 }
-
 // Assemble final website from original HTML with placeholders
 async function assembleFinalWebsite(outputDir) {
-    console.log('\n🌐 STEP 8: Assembling Final Website');
+    console.log('\n🌐 STEP 8: Assembling Final Website with Entity Preservation');
     console.log('='.repeat(60));
     
     try {
-        // Read the original HTML with placeholders
         const originalHtmlPath = path.join(outputDir, 'original_with_placeholders.html');
         if (!await fs.access(originalHtmlPath).then(() => true).catch(() => false)) {
             throw new Error('Original HTML with placeholders not found');
@@ -1660,25 +1786,21 @@ async function assembleFinalWebsite(outputDir) {
         const originalHtml = await fs.readFile(originalHtmlPath, 'utf8');
         console.log(`📄 Loaded original HTML (${originalHtml.length} bytes)`);
         
-        // Extract body content
-        const $ = cheerio.load(originalHtml);
+        // Use cheerio with entity preservation
+        const $ = cheerio.load(originalHtml, { decodeEntities: false });
         let bodyContent = $('body').html() || '';
         
         console.log('🔍 Found placeholders in original HTML:');
         const placeholders = bodyContent.match(/\{\{wigoh-id-\d+\}\}/g) || [];
         placeholders.forEach(placeholder => {
-            console.log(`   📍 ${placeholder}`);
+            console.log(`   🔹 ${placeholder}`);
         });
         
         if (placeholders.length === 0) {
             console.log('⚠️ No component placeholders found in original HTML');
-            return {
-                finalHtml: originalHtml,
-                componentsProcessed: 0
-            };
+            return { finalHtml: originalHtml, componentsProcessed: 0 };
         }
         
-        // Process each component placeholder
         let processedContent = bodyContent;
         let componentsProcessed = 0;
         
@@ -1687,17 +1809,16 @@ async function assembleFinalWebsite(outputDir) {
             if (!componentIdMatch) continue;
             
             const componentId = componentIdMatch[1];
-            console.log(`\n🔄 Processing placeholder: ${placeholder} (component ${componentId})`);
+            console.log(`\n📄 Processing placeholder: ${placeholder} (component ${componentId})`);
             
             try {
-                // Check if component was already processed
                 if (!completedSections.has(componentId)) {
                     await assembleFinalComponent(componentId, outputDir);
                 }
                 
                 const componentData = completedSections.get(componentId);
                 if (componentData && componentData.html && !componentData.failed) {
-                    // Replace placeholder with processed component HTML
+                    // Replace placeholder while preserving entities
                     processedContent = processedContent.replace(placeholder, componentData.html);
                     componentsProcessed++;
                     console.log(`   ✅ Replaced ${placeholder} with assembled component`);
@@ -1709,7 +1830,7 @@ async function assembleFinalWebsite(outputDir) {
             }
         }
         
-        // Create final HTML structure
+        // Create final HTML with proper entity preservation
         const finalHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1726,22 +1847,18 @@ ${processedContent}
         const finalWebsitePath = path.join(outputDir, 'final_website.html');
         await fs.writeFile(finalWebsitePath, finalHtml, 'utf8');
         
-        console.log('\n🎉 Final Website Assembly Complete!');
+        console.log('\n🎉 Final Website Assembly Complete with Entity Preservation!');
         console.log(`📄 Final HTML: ${finalWebsitePath}`);
         console.log(`📊 Components processed: ${componentsProcessed}/${placeholders.length}`);
         console.log(`📏 Final size: ${finalHtml.length} bytes`);
-        
-        // Update browser display
+
         await updateBrowserDisplay(outputDir, true);
         
         return {
             finalHtml,
             finalWebsitePath,
             componentsProcessed,
-            totalPlaceholders: placeholders.length,
-            componentStats: Array.from(completedSections.values())
-                .filter(comp => comp.completed && comp.stats)
-                .map(comp => comp.stats)
+            totalPlaceholders: placeholders.length
         };
         
     } catch (error) {
@@ -1749,7 +1866,6 @@ ${processedContent}
         throw error;
     }
 }
-
 // Update browser display function
 async function updateBrowserDisplay(outputDir, shouldOpenBrowser = false) {
     try {
@@ -1796,8 +1912,6 @@ async function updateBrowserDisplay(outputDir, shouldOpenBrowser = false) {
         console.error('❌ Error updating browser display:', error);
     }
 }
-
-
 // - Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ 
